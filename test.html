@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Real GPT-2 in Browser</title>
+<style>
+:root {
+  --main-accent: #3191e0;
+  --main-bg: #181d24;
+  --main-text: #cfeafd;
+  --panel-bg: #121820;
+}
+body { font-family: monospace; background: var(--main-bg); color: var(--main-text); padding: 24px; }
+.btn { background: var(--main-accent); color: #fff !important; border: none; padding: 8px 16px; cursor: pointer; margin-top: 12px; border-radius: 3px; transition: background 0.15s; font: inherit; }
+.btn:hover { background: #1567b7; }
+input[type="number"], input[type="text"], textarea { background: #222c38; color: var(--main-text); border: 1px solid #314f75; border-radius: 4px; padding: 4px; }
+.tensorList { max-height: 320px; overflow: auto; background: var(--panel-bg); font-size: 0.98em; margin: 0.5em 0; padding: 6px 10px; border-radius: 8px; }
+h1, h2 { color: var(--main-accent); }
+</style>
+</head>
+<body>
+<h1>🤖 Real GPT-2 in Browser</h1>
+<div style="background: #1a3a1a; border-left: 4px solid #4f4; padding: 16px; margin: 16px 0; border-radius: 4px;">
+    <h2 style="margin-top:0;">📖 What is this?</h2>
+    <p>A <b>complete GPT-2 implementation</b> in vanilla JavaScript. Loads real trained weights from GGUF files.</p>
+</div>
+
+<div style="border: 2px solid #4af; padding: 16px; margin: 24px 0; border-radius: 8px; background: #1a2a3a;">
+    <h2 style="margin-top:0;">📥 Step 1: Load GGUF</h2>
+    <input type="file" id="ggufFileInput" accept=".gguf">
+    <button id="loadGgufBtn" class="btn">Load GGUF</button>
+    <span id="ggufStatus" style="margin-left:14px;"></span>
+    <div id="tensorListPanel"></div>
+</div>
+
+<div style="border: 2px solid #f4a; padding: 16px; margin: 24px 0; border-radius: 8px; background: #2a1a2a;">
+    <h2 style="margin-top:0;">📝 Step 2: Load Tokenizer</h2>
+    <input type="file" id="localTokenizerInput" accept=".json" />
+    <button class="btn" onclick="loadLocalTokenizer()">Load Tokenizer</button>
+    <span id="localTokOutput" style="margin-left:14px;"></span>
+</div>
+
+<div style="border: 3px solid #4f4; padding: 20px; margin: 24px 0; border-radius: 8px; background: #1a2a1a;">
+    <h2 style="margin-top:0;">🚀 Step 3: Generate!</h2>
+    <textarea id="promptText" style="width:90%; height: 80px; padding: 8px;">Once upon a time</textarea><br>
+    <label>Max tokens: <input type="number" id="maxTokens" value="20" min="1" max="100" style="width: 60px;"></label>
+    <button class="btn" onclick="generateText()" style="padding: 12px 24px; background: #4f4; color: #000;">Generate!</button>
+    <div id="generationOutput" style="margin:1em 0 0 0;"></div>
+</div>
+
+<script>
+// =================== GPT-2 STORAGE ===================
+const GPT2 = {
+  vocabSize: 50257,
+  embedDim: 768,
+  numLayers: 12,
+  numHeads: 12,
+  headDim: 64,
+  wte: null,
+  wpe: null,
+  blocks: Array.from({ length: 12 }, () => ({
+    ln1: {},
+    attn: {},
+    ln2: {},
+    mlp: {}
+  })),
+  ln_f: {}
+};
+
+// =================== HELPERS ===================
+function loadF32(buffer, offset, count) {
+  return new Float32Array(buffer, offset, count);
+}
+
+function softmax(arr) {
+  const max = Math.max(...arr);
+  const exps = arr.map(x => Math.exp(x - max));
+  const sum = exps.reduce((a, b) => a + b, 0);
+  return exps.map(x => x / sum);
+}
+
+function gelu(x) {
+  return 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x ** 3)));
+}
+
+function layerNorm(x, w, b) {
+  const mean = x.reduce((a, b) => a + b, 0) / x.length;
+  const varr = x.reduce((a, b) => a + (b - mean) ** 2, 0) / x.length;
+  const std = Math.sqrt(varr + 1e-5);
+  return x.map((v, i) => (v - mean) / std * w[i] + b[i]);
+}
+
+// =================== GPT-2 ATTENTION ===================
+class GPT2Attention {
+  constructor(block) {
+    this.block = block;
+  }
+
+  forward(x) {
+    const T = x.length;
+    const D = GPT2.embedDim;
+    const H = GPT2.numHeads;
+    const HD = GPT2.headDim;
+
+    const qkv = Array.from({ length: T }, () => new Float32Array(3 * D));
+
+    for (let t = 0; t < T; t++) {
+      for (let j = 0; j < 3 * D; j++) {
+        qkv[t][j] = this.block.attn.c_attn_b[j];
+      }
+      for (let i = 0; i < D; i++) {
+        for (let j = 0; j < 3 * D; j++) {
+          qkv[t][j] += x[t][i] * this.block.attn.c_attn_w[i * 3 * D + j];
+        }
+      }
+    }
+
+    const out = Array.from({ length: T }, () => new Float32Array(D));
+
+    for (let h = 0; h < H; h++) {
+      const offset = h * HD;
+
+      for (let t = 0; t < T; t++) {
+        const scores = new Float32Array(t + 1);
+
+        for (let s = 0; s <= t; s++) {
+          let dot = 0;
+          for (let i = 0; i < HD; i++) {
+            dot += qkv[t][offset + i] * qkv[s][D + offset + i];
+          }
+          scores[s] = dot / Math.sqrt(HD);
+        }
+
+        const probs = softmax(scores);
+
+        for (let i = 0; i < HD; i++) {
+          let sum = 0;
+          for (let s = 0; s <= t; s++) {
+            sum += probs[s] * qkv[s][2 * D + offset + i];
+          }
+          out[t][offset + i] = sum;
+        }
+      }
+    }
+
+    const projected = Array.from({ length: T }, () => new Float32Array(D));
+    for (let t = 0; t < T; t++) {
+      for (let i = 0; i < D; i++) {
+        projected[t][i] = this.block.attn.c_proj_b[i];
+        for (let j = 0; j < D; j++) {
+          projected[t][i] += out[t][j] * this.block.attn.c_proj_w[j * D + i];
+        }
+      }
+    }
+
+    return projected;
+  }
+}
+
+// =================== GGUF PARSING ===================
+function readUint32(view, offset) {
+  return view.getUint32(offset, true);
+}
+
+function readUint64(view, offset) {
+  const low = view.getUint32(offset, true);
+  const high = view.getUint32(offset + 4, true);
+  return low + high * 0x100000000;
+}
+
+function readStringSafe(view, offset) {
+  if (offset + 8 > view.byteLength) {
+    return { string: "<incomplete>", nextOffset: view.byteLength, truncated: true };
+  }
+  let strLen = readUint64(view, offset);
+  const stringOffset = offset + 8;
+  if (stringOffset + strLen > view.byteLength) {
+    return { string: "<truncated>", nextOffset: view.byteLength, truncated: true };
+  }
+  const bytes = new Uint8Array(view.buffer, view.byteOffset + stringOffset, strLen);
+  const string = new TextDecoder().decode(bytes);
+  return { string, nextOffset: stringOffset + strLen, truncated: false };
+}
+
+function readMetadataValue(view, offset, type) {
+  let value, nextOffset = offset;
+  try {
+    if (type === 4) { // UINT32
+      value = readUint32(view, offset);
+      nextOffset = offset + 4;
+    } else if (type === 8) { // STRING
+      const result = readStringSafe(view, offset);
+      value = result.string;
+      nextOffset = result.nextOffset;
+    } else {
+      value = 'UNSUPPORTED';
+      nextOffset = offset;
+    }
+  } catch(e) {
+    value = `<error: ${e.message}>`;
+    nextOffset = view.byteLength;
+  }
+  return { value, nextOffset };
+}
+
+function parseAndLoadGguf(buffer) {
+  let view = new DataView(buffer);
+  let offset = 0;
+  let out = "";
+  
+  try {
+    let magicBytes = [];
+    for (let i = 0; i < 4; ++i) magicBytes.push(view.getUint8(offset + i));
+    let magic = String.fromCharCode(...magicBytes);
+    let version = view.getUint32(4, true);
+    offset += 8;
+    
+    let tensorCount = readUint64(view, offset); offset += 8;
+    let metadataCount = readUint64(view, offset); offset += 8;
+    
+    out += `<div>Magic: <b>${magic}</b> | Version: <b>${version}</b></div>`;
+    out += `<div>Tensors: <b>${tensorCount}</b> | Metadata: <b>${metadataCount}</b></div>`;
+    
+    // Skip metadata
+    for (let i = 0; i < metadataCount; ++i) {
+      const { nextOffset: afterKey } = readStringSafe(view, offset);
+      offset = afterKey;
+      if (offset + 4 > view.byteLength) break;
+      const valueType = readUint32(view, offset); offset += 4;
+      const { nextOffset: afterValue } = readMetadataValue(view, offset, valueType);
+      offset = afterValue;
+    }
+    
+    // Parse tensors
+    let tensors = [];
+    for (let i = 0; i < tensorCount; ++i) {
+      if (offset >= view.byteLength) break;
+      
+      const { string: name, nextOffset: afterName, truncated } = readStringSafe(view, offset);
+      if (truncated) break;
+      offset = afterName;
+      
+      if (offset + 4 > view.byteLength) break;
+      let n_dims = readUint32(view, offset); offset += 4;
+      
+      let shape = [];
+      for (let d = 0; d < n_dims; ++d) {
+        if (offset + 8 > view.byteLength) break;
+        shape.push(readUint64(view, offset)); offset += 8;
+      }
+      
+      if (offset + 4 > view.byteLength) break;
+      let dtype = readUint32(view, offset); offset += 4;
+      
+      if (offset + 8 > view.byteLength) break;
+      let dataOffset = readUint64(view, offset); offset += 8;
+      
+      tensors.push({ name, shape, dtype, dataOffset });
+    }
+    
+    console.log('Parsed', tensors.length, 'tensors');
+    console.log('First 20 tensor names:');
+    for (let i = 0; i < Math.min(20, tensors.length); i++) {
+      console.log(`  ${i}: "${tensors[i].name}" shape:[${tensors[i].shape.join(',')}]`);
+    }
+    
+    // Show in UI too
+    let debugHtml = "<details style='margin-top:8px;'><summary style='cursor:pointer;color:#4af;'>🔍 Debug: Tensor Names</summary><div style='font-size:0.85em; max-height:200px; overflow:auto; padding:8px;'>";
+    for (let i = 0; i < Math.min(20, tensors.length); i++) {
+      debugHtml += `${i}: "${tensors[i].name}" [${tensors[i].shape.join(',')}]<br>`;
+    }
+    debugHtml += "</div></details>";
+    out += debugHtml;
+    
+    // Calculate tensor data start
+    const alignment = 32;
+    let tensorDataStart = offset;
+    let remainder = tensorDataStart % alignment;
+    if (remainder !== 0) {
+      tensorDataStart += alignment - remainder;
+    }
+    
+    // Load tensors - try EVERY possible naming pattern
+    let loadedCount = 0;
+    
+    for (const t of tensors) {
+      const dataOffset = tensorDataStart + t.dataOffset;
+      const name = t.name.toLowerCase(); // Case insensitive matching
+      
+      // Token embeddings - check all variations
+      if (name.includes("wte") || 
+          name.includes("token_embd") || 
+          name.includes("tok_embd") ||
+          name.includes("embed_tokens") ||
+          name.includes("word_embd") ||
+          (name.includes("embed") && !name.includes("pos"))) {
+        try {
+          GPT2.wte = loadF32(buffer, dataOffset, GPT2.vocabSize * GPT2.embedDim);
+          console.log('✓ Loaded wte from:', t.name, 'shape:', t.shape);
+          loadedCount++;
+        } catch(e) {
+          console.error('Failed to load wte from', t.name, e);
+        }
+      }
+      
+      // Position embeddings
+      if (name.includes("wpe") || 
+          name.includes("position_embd") || 
+          name.includes("pos_embd") ||
+          name.includes("position_embed")) {
+        try {
+          GPT2.wpe = loadF32(buffer, dataOffset, 1024 * GPT2.embedDim);
+          console.log('✓ Loaded wpe from:', t.name, 'shape:', t.shape);
+          loadedCount++;
+        } catch(e) {
+          console.error('Failed to load wpe from', t.name, e);
+        }
+      }
+      
+      // Final LayerNorm - check multiple patterns
+      if (t.name.match(/ln_f\.weight$/) || 
+          t.name.match(/norm_f\.weight$/) ||
+          t.name.match(/final_norm\.weight$/) ||
+          t.name.match(/output_norm\.weight$/)) {
+        GPT2.ln_f.weight = loadF32(buffer, dataOffset, GPT2.embedDim);
+        console.log('✓ Loaded ln_f.weight from:', t.name);
+        loadedCount++;
+      }
+      if (t.name.match(/ln_f\.bias$/) || 
+          t.name.match(/norm_f\.bias$/) ||
+          t.name.match(/final_norm\.bias$/) ||
+          t.name.match(/output_norm\.bias$/)) {
+        GPT2.ln_f.bias = loadF32(buffer, dataOffset, GPT2.embedDim);
+        console.log('✓ Loaded ln_f.bias from:', t.name);
+        loadedCount++;
+      }
+      
+      // Transformer blocks - try multiple regex patterns
+      let m = t.name.match(/^(?:transformer\.)?h\.(\d+)\.(.+)$/);
+      if (!m) m = t.name.match(/^blk\.(\d+)\.(.+)$/);
+      if (!m) m = t.name.match(/^model\.layers\.(\d+)\.(.+)$/);
+      if (!m) m = t.name.match(/^layers\.(\d+)\.(.+)$/);
+      if (!m) m = t.name.match(/^blocks\.(\d+)\.(.+)$/);
+      
+      if (!m) continue;
+      
+      const layer = parseInt(m[1]);
+      if (layer >= GPT2.numLayers) continue;
+      
+      const key = m[2];
+      const block = GPT2.blocks[layer];
+      
+      if (key === "ln_1.weight" || key === "attn_norm.weight") {
+        block.ln1.weight = loadF32(buffer, dataOffset, GPT2.embedDim);
+        if (layer === 0) console.log('✓ Loaded layer 0 ln_1.weight from:', t.name);
+        loadedCount++;
+      }
+      if (key === "ln_1.bias" || key === "attn_norm.bias") {
+        block.ln1.bias = loadF32(buffer, dataOffset, GPT2.embedDim);
+        loadedCount++;
+      }
+      if (key === "ln_2.weight" || key === "ffn_norm.weight") {
+        block.ln2.weight = loadF32(buffer, dataOffset, GPT2.embedDim);
+        loadedCount++;
+      }
+      if (key === "ln_2.bias" || key === "ffn_norm.bias") {
+        block.ln2.bias = loadF32(buffer, dataOffset, GPT2.embedDim);
+        loadedCount++;
+      }
+      if (key === "attn.c_attn.weight" || key === "attn_qkv.weight") {
+        block.attn.c_attn_w = loadF32(buffer, dataOffset, GPT2.embedDim * 3 * GPT2.embedDim);
+        if (layer === 0) console.log('✓ Loaded layer 0 attn.c_attn.weight from:', t.name);
+        loadedCount++;
+      }
+      if (key === "attn.c_attn.bias" || key === "attn_qkv.bias") {
+        block.attn.c_attn_b = loadF32(buffer, dataOffset, 3 * GPT2.embedDim);
+        loadedCount++;
+      }
+      if (key === "attn.c_proj.weight" || key === "attn_output.weight") {
+        block.attn.c_proj_w = loadF32(buffer, dataOffset, GPT2.embedDim * GPT2.embedDim);
+        loadedCount++;
+      }
+      if (key === "attn.c_proj.bias" || key === "attn_output.bias") {
+        block.attn.c_proj_b = loadF32(buffer, dataOffset, GPT2.embedDim);
+        loadedCount++;
+      }
+      if (key === "mlp.c_fc.weight" || key === "ffn_up.weight") {
+        block.mlp.fc_w = loadF32(buffer, dataOffset, GPT2.embedDim * 3072);
+        loadedCount++;
+      }
+      if (key === "mlp.c_fc.bias" || key === "ffn_up.bias") {
+        block.mlp.fc_b = loadF32(buffer, dataOffset, 3072);
+        loadedCount++;
+      }
+      if (key === "mlp.c_proj.weight" || key === "ffn_down.weight") {
+        block.mlp.proj_w = loadF32(buffer, dataOffset, 3072 * GPT2.embedDim);
+        loadedCount++;
+      }
+      if (key === "mlp.c_proj.bias" || key === "ffn_down.bias") {
+        block.mlp.proj_b = loadF32(buffer, dataOffset, GPT2.embedDim);
+        loadedCount++;
+      }
+    }
+    
+    out += `<div style='color:#4f4; margin-top:8px'><b>✓ Loaded ${loadedCount} tensors</b></div>`;
+    
+    // Verify
+    let missingList = [];
+    if (!GPT2.wte) missingList.push('wte');
+    if (!GPT2.wpe) missingList.push('wpe');
+    if (!GPT2.ln_f.weight) missingList.push('ln_f.weight');
+    
+    if (missingList.length > 0) {
+      out += `<div style='color:#f84'><b>⚠ Missing:</b> ${missingList.join(', ')}</div>`;
+      out += `<div>Check console for tensor names</div>`;
+    } else {
+      out += `<div style='color:#4f4'><b>✓ Ready!</b></div>`;
+    }
+    
+    document.getElementById("tensorListPanel").innerHTML = out;
+    document.getElementById('ggufStatus').textContent = `✓ ${loadedCount} tensors`;
+    
+  } catch (e) {
+    document.getElementById('ggufStatus').textContent = "Error: " + e.message;
+    console.error('GGUF error:', e);
+  }
+}
+
+document.getElementById('loadGgufBtn').onclick = function() {
+  const file = document.getElementById('ggufFileInput').files[0];
+  if (!file) {
+    document.getElementById('ggufStatus').textContent = "No file!";
+    return;
+  }
+  document.getElementById('ggufStatus').textContent = "Loading...";
+  file.arrayBuffer().then(buf => parseAndLoadGguf(buf));
+};
+</script>
+
+<script type="module">
+import { AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.13.0/dist/transformers.min.js";
+
+let localTokenizer = null;
+let tokenizerContent = null;
+
+const originalFetch = window.fetch;
+window.fetch = function(url, options) {
+  const urlStr = typeof url === 'string' ? url : url.toString();
+  if (tokenizerContent && urlStr.includes('tokenizer.json')) {
+    return Promise.resolve(new Response(tokenizerContent, {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    }));
+  }
+  if (urlStr.includes('tokenizer_config.json')) {
+    return Promise.resolve(new Response(JSON.stringify({}), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    }));
+  }
+  return originalFetch(url, options);
+};
+
+window.loadLocalTokenizer = async function() {
+  const fileInput = document.getElementById("localTokenizerInput");
+  if (!fileInput.files.length) {
+    document.getElementById("localTokOutput").textContent = "No file!";
+    return;
+  }
+
+  try {
+    let file = fileInput.files[0];
+    let text = await file.text();
+    JSON.parse(text);
+    tokenizerContent = text;
+    localTokenizer = await AutoTokenizer.from_pretrained('local-model');
+    document.getElementById("localTokOutput").textContent = "✓ Loaded!";
+  } catch(e) {
+    document.getElementById("localTokOutput").textContent = "Failed: " + e.message;
+  }
+};
+
+let generationCancelled = false;
+window.cancelGeneration = () => { generationCancelled = true; };
+
+window.generateText = async function() {
+  const output = document.getElementById('generationOutput');
+  
+  if (!localTokenizer) {
+    output.innerHTML = "<span style='color:#f44'>⚠ Load tokenizer first!</span>";
+    return;
+  }
+  
+  if (!GPT2.wte) {
+    output.innerHTML = "<span style='color:#f44'>⚠ Load GGUF first!</span>";
+    return;
+  }
+  
+  const promptText = document.getElementById('promptText').value;
+  const maxTokens = parseInt(document.getElementById('maxTokens').value);
+  
+  if (!promptText.trim()) {
+    output.innerHTML = "<span style='color:#f44'>⚠ Enter prompt!</span>";
+    return;
+  }
+  
+  generationCancelled = false;
+  
+  try {
+    output.innerHTML = "<div>⏳ Encoding...</div>";
+    
+    let currentIds = await localTokenizer.encode(promptText);
+    console.log('Input IDs:', currentIds);
+    
+    output.innerHTML = "<div style='color:#4f4'>✓ Generating...<br><button class='btn' onclick='cancelGeneration()'>Cancel</button></div>";
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    let generatedTokens = [];
+    let startTime = Date.now();
+    
+    for (let step = 0; step < maxTokens; step++) {
+      if (generationCancelled) {
+        output.innerHTML += "<div>⚠ Cancelled</div>";
+        break;
+      }
+      
+      const stepStart = Date.now();
+      output.innerHTML = `<div>⏳ Token ${step + 1}/${maxTokens}... <button class='btn' onclick='cancelGeneration()'>Cancel</button></div>`;
+      await new Promise(resolve => setTimeout(resolve, 10));
+      
+      // Get embeddings
+      let x = Array.from({ length: currentIds.length }, (_, i) => {
+        const tokenId = currentIds[i];
+        const embedding = new Float32Array(GPT2.embedDim);
+        for (let d = 0; d < GPT2.embedDim; d++) {
+          embedding[d] = GPT2.wte[tokenId * GPT2.embedDim + d] + GPT2.wpe[i * GPT2.embedDim + d];
+        }
+        return embedding;
+      });
+      
+      // Run through all 12 layers
+      for (let layerIdx = 0; layerIdx < GPT2.numLayers; layerIdx++) {
+        const block = GPT2.blocks[layerIdx];
+        
+        // Layer norm 1
+        const ln1_out = x.map(vec => layerNorm(Array.from(vec), block.ln1.weight, block.ln1.bias));
+        
+        // Attention
+        const attn = new GPT2Attention(block);
+        const attn_out = attn.forward(ln1_out);
+        
+        // Residual
+        x = x.map((vec, i) => vec.map((v, j) => v + attn_out[i][j]));
+        
+        // Layer norm 2
+        const ln2_out = x.map(vec => layerNorm(Array.from(vec), block.ln2.weight, block.ln2.bias));
+        
+        // MLP
+        const mlp_out = ln2_out.map(vec => {
+          const hidden = new Float32Array(3072);
+          for (let h = 0; h < 3072; h++) {
+            hidden[h] = block.mlp.fc_b[h];
+            for (let d = 0; d < GPT2.embedDim; d++) {
+              hidden[h] += vec[d] * block.mlp.fc_w[d * 3072 + h];
+            }
+            hidden[h] = gelu(hidden[h]);
+          }
+          
+          const out = new Float32Array(GPT2.embedDim);
+          for (let d = 0; d < GPT2.embedDim; d++) {
+            out[d] = block.mlp.proj_b[d];
+            for (let h = 0; h < 3072; h++) {
+              out[d] += hidden[h] * block.mlp.proj_w[h * GPT2.embedDim + d];
+            }
+          }
+          return out;
+        });
+        
+        // Residual
+        x = x.map((vec, i) => vec.map((v, j) => v + mlp_out[i][j]));
+      }
+      
+      // Final layer norm
+      const last_vec = layerNorm(Array.from(x[x.length - 1]), GPT2.ln_f.weight, GPT2.ln_f.bias);
+      
+      // Compute logits (weight tying)
+      const logits = new Float32Array(GPT2.vocabSize);
+      for (let v = 0; v < GPT2.vocabSize; v++) {
+        let s = 0;
+        for (let d = 0; d < GPT2.embedDim; d++) {
+          s += last_vec[d] * GPT2.wte[v * GPT2.embedDim + d];
+        }
+        logits[v] = s;
+      }
+      
+      // Greedy sampling
+      let bestTokenId = 0;
+      let bestLogit = logits[0];
+      for (let i = 1; i < logits.length; i++) {
+        if (logits[i] > bestLogit) {
+          bestLogit = logits[i];
+          bestTokenId = i;
+        }
+      }
+      
+      const stepTime = Date.now() - stepStart;
+      console.log(`Token ${step}: ${bestTokenId} (${bestLogit.toFixed(2)}) in ${stepTime}ms`);
+      
+      currentIds = [...currentIds, bestTokenId];
+      generatedTokens.push(bestTokenId);
+      
+      const partialText = await localTokenizer.decode(currentIds);
+      output.innerHTML = `
+        <div>⏳ Token ${step + 1}/${maxTokens} (${stepTime}ms) <button class='btn' onclick='cancelGeneration()'>Cancel</button></div>
+        <div style='margin-top:8px; padding:8px; background:#2a2a2a; border-left: 3px solid #4f4;'>
+          <b>Output:</b> "${partialText}"
+        </div>
+      `;
+      
+      if (bestTokenId === 50256) break;
+    }
+    
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    const generatedText = await localTokenizer.decode(currentIds);
+    
+    output.innerHTML = `
+      <div style='color:#4f4'><b>✓ Done in ${totalTime}s!</b></div>
+      <div style='margin-top:8px'><b>Prompt:</b> "${promptText}"</div>
+      <div style='margin-top:8px; padding:12px; background:#1a3a1a; border-left: 3px solid #4f4;'>
+        <b>Generated:</b><br>
+        <span style='font-size:1.1em'>"${generatedText}"</span>
+      </div>
+      <div style='color:#aaa; font-size:0.9em; margin-top:8px'>
+        ${generatedTokens.length} tokens | ${(generatedTokens.length / parseFloat(totalTime)).toFixed(1)} tok/s
+      </div>
+    `;
+    
+  } catch(e) {
+    output.innerHTML = `<span style='color:#f44'>⚠ Error: ${e.message}</span>`;
+    console.error("Error:", e);
+  }
+}
+</script>
+</body>
+</html>
