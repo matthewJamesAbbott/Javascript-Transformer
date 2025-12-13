@@ -3,25 +3,119 @@
 <head>
     <meta charset="UTF-8">
     <title>JS Transformer Playground + Local Tokenizer Upload + GGUF Loader</title>
-    <style>
-        body { font-family: monospace; background: #232323; color: #ddd; padding: 24px; }
-        .output { margin-top: 24px; font-size: 1.1em; }
-        .btn { background: #444; color: #fff; border: none; padding: 8px 16px; cursor: pointer; margin-top: 12px;}
-        .btn:hover { background: #666; }
-        input[type="number"] { width: 60px; }
+<style>
+        :root {
+          --main-accent: #3191e0;
+          --main-bg: #181d24;
+          --main-text: #cfeafd;
+          --panel-bg: #121820;
+        }
+        body { 
+            font-family: monospace; 
+            background: var(--main-bg); 
+            color: var(--main-text); 
+            padding: 24px; 
+        }
+        .output { margin-top: 24px; font-size: 1.1em; color: var(--main-accent);}
+         button.btn,
+         input.btn,
+         .btn {
+            background: var(--main-accent);
+            color: #fff !important;
+            border: none;
+            padding: 8px 16px;
+            cursor: pointer;
+            margin-top: 12px;
+            border-radius: 3px;
+            transition: background 0.15s, color 0.15s;
+            font: inherit;
+         }
+
+         button.btn:hover,
+         input.btn:hover,
+         .btn:hover,
+         button.btn:focus,
+         input.btn:focus,
+         .btn:focus,
+         button.btn:active,
+         input.btn:active,
+        .btn:active {
+           background: #1567b7;
+           color: #fff !important;
+           outline: none;
+        }
+        input[type="number"], input[type="text"], textarea { 
+            background: #222c38; color: var(--main-text); border: 1px solid #314f75; 
+            border-radius: 4px;
+        }
         .fileUpload { margin: 18px 0 8px 0; }
-        .tensorList { max-height: 320px; overflow: auto; background: #181818; font-size: 0.98em; margin: 0.5em 0 0.5em 0; padding: 6px 10px; border-radius: 8px;}
-        .inputVecBox { width: 76%; margin: 0.8em 0; padding: 4px; font-size: 1em; background: #2f2f2f; color: #ffe;}
-        #localTokOutput { margin-left: 1em; color: #ffe138; }
+        .tensorList { 
+            max-height: 320px; 
+            overflow: auto; 
+            background: var(--panel-bg); 
+            font-size: 0.98em; 
+            margin: 0.5em 0 0.5em 0; 
+            padding: 6px 10px;
+            border-radius: 8px;
+            color: var(--main-accent);
+        }
+        .inputVecBox { 
+            width: 76%; 
+            margin: 0.8em 0; 
+            padding: 4px; 
+            font-size: 1em; 
+            background: #202c38; 
+            color: var(--main-text);
+            border: 1px solid #314f75;
+            border-radius: 4px;
+        }
+        #localTokOutput { margin-left: 1em; color: var(--main-accent); }
+        a, a:visited { color: #86bff7; }
+        h1, h2, h3 { color: var(--main-accent);}
+        [style*="color:#4f4"], [style*="color:#ffa"], [style*="color:#bffcff"], [style*="color:#4af"], [style*="color:#f4a"], [style*="color:#ffe138"], [style*="color:#ffa"] {
+            color: var(--main-accent)!important;
+        }
+        [style*="border-left: 4px solid"], [style*="border-left: 3px solid"], [style*="border: 3px solid"], [style*="border: 2px solid"], [style*="border:2px solid"] {
+            border-color: var(--main-accent)!important;
+        }
+        [style*="background: #1a3a1a"], [style*="background: #1a2a3a"],[style*="background: #2a1a2a"],[style*="background: #1a2a1a"],[style*="background: #2a2a2a"],[style*="background: #1a1a1a"],[style*="background: #2a2a2a"],[style*="background: #2a2a2a"] {
+            background: var(--panel-bg)!important;
+        }
+        .tensorList b,
+        summary,
+        label,
+        .btn,
+        .output,
+        #localTokOutput {
+            color: var(--main-accent)!important;
+        }
+        details[open] summary {
+            border-bottom: 1px solid #2c4d72;
+        }
+        /* Custom scroll bar */
+        ::-webkit-scrollbar {
+          width: 8px;
+        }
+        ::-webkit-scrollbar-thumb {
+          background: #223957;
+          border-radius: 8px;
+        }
+        ::selection {
+          background: var(--main-accent); 
+          color: #fff;
+        }
+        /* Error and warning formatting overrides */
+        [style*="color:#f885"], [style*="color:#f84"], [style*="color:#f44"] {
+            color: #ec197b!important;
+        }
     </style>
-</head>
 <body>
 <h1>🤖 Browser Transformer: GGUF + Text Generation</h1>
 <div style="background: #1a3a1a; border-left: 4px solid #4f4; padding: 16px; margin: 16px 0; border-radius: 4px;">
     <h2 style="margin-top:0; color:#4f4;">📖 What is this?</h2>
     <p style="margin: 8px 0;">A <b>complete transformer implementation</b> written in vanilla JavaScript that runs entirely in your browser. No server, no Python, no frameworks.</p>
     <p style="margin: 8px 0;"><b>Features:</b> GGUF file parser • Embedding extraction • Multi-head attention • Feed-forward networks • Autoregressive text generation</p>
-    <p style="margin: 8px 0; color:#ffa;"><b>⚠ Note:</b> Uses random weights (not trained GPT-2) for transformer blocks, so output will be nonsense. This is a proof-of-concept showing the full pipeline works!</p>
+    <p style="margin: 8px 0; color:#ffa;"><b> Note:</b> Uses random weights (not trained GPT-2) for transformer blocks, so output will be nonsense. This is a proof-of-concept showing the full pipeline works!</p>
 </div>
 
 <!-- ============ SECTION 1: TEST PLAYGROUND (ADVANCED) ============ -->
@@ -49,7 +143,7 @@
 </details>
 <!-- ============ SECTION 2: GGUF LOADER ============ -->
 <div style="border: 2px solid #4af; padding: 16px; margin: 24px 0; border-radius: 8px; background: #1a2a3a;">
-    <h2 style="margin-top:0; color:#4af;">📦 Step 1: Load GGUF Model File</h2>
+    <h2 style="margin-top:0; color:#4af;"> Step 1: Load GGUF Model File</h2>
     <p style="color: #aaa; margin: 8px 0;">Upload a GGUF model file (like GPT-2-f32.gguf) to extract the embedding layer. This parses the file and shows all 149+ tensors inside.</p>
     <div class="fileUpload">
         <label style="font-weight:bold">
@@ -64,14 +158,14 @@
 
 <!-- ============ SECTION 3: TOKENIZER LOADER ============ -->
 <div style="border: 2px solid #f4a; padding: 16px; margin: 24px 0; border-radius: 8px; background: #2a1a2a;">
-    <h2 style="margin-top:0; color:#f4a;">🔤 Step 2: Load Tokenizer</h2>
+    <h2 style="margin-top:0; color:#f4a;"> Step 2: Load Tokenizer</h2>
     <p style="color: #aaa; margin: 8px 0;">Upload the tokenizer.json file (from the same model) to convert text into token IDs.</p>
     <input type="file" id="localTokenizerInput" accept=".json" />
     <button class="btn" onclick="loadLocalTokenizer()">Load Tokenizer</button>
     <span id="localTokOutput"></span>
     
     <details style="margin-top: 16px; background: #1a1a1a; padding: 12px; border-radius: 4px;">
-        <summary style="cursor: pointer; color: #aaa;">🔍 Test Tokenizer (Optional)</summary>
+        <summary style="cursor: pointer; color: #aaa;"> Test Tokenizer (Optional)</summary>
         <div style="margin-top: 12px;">
             <p style="color: #888; font-size: 0.9em;">This is just for testing - type text to see how it's tokenized.</p>
             <input type="text" id="userText" style="width:70%;margin-top: 0.6em" placeholder="Type something to test...">
@@ -85,7 +179,7 @@
 <div style="border: 3px solid #4f4; padding: 20px; margin: 24px 0; border-radius: 8px; background: #1a2a1a;">
     <h2 style="margin-top:0; color:#4f4;">🚀 Step 3: Generate Text!</h2>
     <p style="color: #aaa; margin: 8px 0; font-size: 1.1em;">Now that you've loaded the GGUF embeddings and tokenizer, you can generate text! Type a prompt below and click "Generate Text!"</p>
-    <p style="color: #ffa; margin: 8px 0; font-size: 0.95em;"><b>⚠ Remember:</b> Output will be random/nonsense because we're using untrained transformer weights (not real GPT-2 weights).</p>
+    <p style="color: #ffa; margin: 8px 0; font-size: 0.95em;"><b> Remember:</b> Output will be random/nonsense because we're using untrained transformer weights (not real GPT-2 weights).</p>
     <textarea id="promptText" style="width:90%;margin-top: 0.8em; height: 80px; padding: 8px; font-size: 1em;" placeholder="Enter your prompt here... (e.g., 'Once upon a time')">Once upon a time</textarea><br>
     <label style="margin-top: 12px; display: block;">Max new tokens: <input type="number" id="maxTokens" value="5" min="1" max="100" style="width: 60px;"> <span style="color:#888; font-size:0.9em;">(Recommended: 3-5 for speed)</span></label>
     <button class="btn" onclick="generateText()" style="margin-top: 12px; padding: 12px 24px; font-size: 1.1em; background: #4f4; color: #000;">Generate Text!</button>
@@ -548,7 +642,7 @@ function parseAndLoadGguf(buffer, embedDim, numClasses) {
                 vocabSize = shape0;
             } else {
                 out += debugTensorNames;
-                out += `<div style='color:#f84; margin-top:8px'><b>⚠ Unexpected embedding shape: [${shape0}, ${shape1}]</b></div>`;
+                out += `<div style='color:#f84; margin-top:8px'><b> Unexpected embedding shape: [${shape0}, ${shape1}]</b></div>`;
                 document.getElementById("tensorListPanel").innerHTML = out;
                 document.getElementById('ggufStatus').textContent += " | Shape error";
                 return;
@@ -588,12 +682,12 @@ function parseAndLoadGguf(buffer, embedDim, numClasses) {
                 console.log('First few values:', Array.from(embeddingMatrix.slice(0, 10)));
             } catch(e) {
                 out += debugTensorNames;
-                out += `<div style='color:#f84; margin-top:8px'><b>⚠ Failed to read embedding data: ${e.message}</b></div>`;
+                out += `<div style='color:#f84; margin-top:8px'><b> Failed to read embedding data: ${e.message}</b></div>`;
                 console.error('Failed to read embeddings:', e);
             }
         } else {
             out += debugTensorNames;
-            out += `<div style='color:#f84; margin-top:8px'><b>⚠ Embedding layer not found</b></div>`;
+            out += `<div style='color:#f84; margin-top:8px'><b> Embedding layer not found</b></div>`;
         }
         
         out += `<div class="tensorList"><b>Tensor List:</b><br>${tensorListOut}</div>`;
@@ -738,12 +832,12 @@ window.generateText = async function() {
     const output = document.getElementById('generationOutput');
     
     if (!localTokenizer) {
-        output.innerHTML = "<span style='color:#f44'>❌ Please load a tokenizer first!</span>";
+        output.innerHTML = "<span style='color:#f44'> Please load a tokenizer first!</span>";
         return;
     }
     
     if (!embeddingMatrix) {
-        output.innerHTML = "<span style='color:#f44'>❌ Please load a GGUF file first to get embeddings!</span>";
+        output.innerHTML = "<span style='color:#f44'> Please load a GGUF file first to get embeddings!</span>";
         return;
     }
     
@@ -751,19 +845,19 @@ window.generateText = async function() {
     const maxTokens = parseInt(document.getElementById('maxTokens').value);
     
     if (!promptText.trim()) {
-        output.innerHTML = "<span style='color:#f44'>❌ Please enter a prompt!</span>";
+        output.innerHTML = "<span style='color:#f44'> Please enter a prompt!</span>";
         return;
     }
     
     if (maxTokens > 10) {
-        output.innerHTML = "<span style='color:#f84'>⚠ Warning: Max tokens > 10 will be VERY slow with random weights. Recommended: 3-5 tokens max.</span>";
+        output.innerHTML = "<span style='color:#f84'> Warning: Max tokens > 10 will be VERY slow with random weights. Recommended: 3-5 tokens max.</span>";
         await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
     generationCancelled = false;
     
     try {
-        output.innerHTML = "<div style='color:#4af'>⏳ Encoding prompt...</div>";
+        output.innerHTML = "<div style='color:#4af'> Encoding prompt...</div>";
         
         // Encode the prompt
         let currentIds = await localTokenizer.encode(promptText);
@@ -777,7 +871,7 @@ window.generateText = async function() {
         const numBlocks = 2;   // Real GPT-2: 12
         const ffnHidden = 512; // Real GPT-2: 3072
         
-        output.innerHTML = "<div style='color:#4af'>⏳ Creating mini-transformer (2 heads, 2 blocks)...</div>";
+        output.innerHTML = "<div style='color:#4af'> Creating mini-transformer (2 heads, 2 blocks)...</div>";
         await new Promise(resolve => setTimeout(resolve, 100));
         
         let transformer = new Transformer(embedDim, numHeads, numBlocks, ffnHidden, 1024, vocabSize);
@@ -791,12 +885,12 @@ window.generateText = async function() {
         
         for (let step = 0; step < maxTokens; step++) {
             if (generationCancelled) {
-                output.innerHTML += "<div style='color:#f84'>⚠ Generation cancelled by user</div>";
+                output.innerHTML += "<div style='color:#f84'> Generation cancelled by user</div>";
                 break;
             }
             
             const stepStart = Date.now();
-            output.innerHTML = `<div style='color:#4af'>⏳ Token ${step + 1}/${maxTokens}... <button class='btn' onclick='cancelGeneration()'>Cancel</button></div>`;
+            output.innerHTML = `<div style='color:#4af'> Token ${step + 1}/${maxTokens}... <button class='btn' onclick='cancelGeneration()'>Cancel</button></div>`;
             
             // Yield to browser to update UI
             await new Promise(resolve => setTimeout(resolve, 10));
@@ -834,7 +928,7 @@ window.generateText = async function() {
             // Show partial result
             const partialText = await localTokenizer.decode(currentIds);
             output.innerHTML = `
-                <div style='color:#4af'>⏳ Token ${step + 1}/${maxTokens} (${stepTime}ms) <button class='btn' onclick='cancelGeneration()'>Cancel</button></div>
+                <div style='color:#4af'> Token ${step + 1}/${maxTokens} (${stepTime}ms) <button class='btn' onclick='cancelGeneration()'>Cancel</button></div>
                 <div style='margin-top:8px; padding:8px; background:#2a2a2a; border-left: 3px solid #4af;'>
                     <b>Current:</b> "${partialText}"
                 </div>
@@ -857,12 +951,12 @@ window.generateText = async function() {
                 ${generatedTokens.length} tokens | ${(generatedTokens.length / parseFloat(totalTime)).toFixed(1)} tokens/sec
             </div>
             <div style='color:#888; font-size:0.85em; margin-top:4px'>
-                ⚠ Using mini-transformer (2 heads, 2 blocks) with random weights. Real GPT-2 has 12 heads, 12 blocks.
+                Using mini-transformer (2 heads, 2 blocks) with random weights. Real GPT-2 has 12 heads, 12 blocks.
             </div>
         `;
         
     } catch(e) {
-        output.innerHTML = `<span style='color:#f44'>❌ Generation failed: ${e.message}</span>`;
+        output.innerHTML = `<span style='color:#f44'> Generation failed: ${e.message}</span>`;
         console.error("Generation error:", e);
         console.error(e.stack);
     }
