@@ -28,7 +28,7 @@ You need **2 files**:
 1. **A GPT-2 model in GGUF format (f32 recommended for simplicity)**  
    - Example: `gpt2-f32.gguf` or any transformer model `*.gguf` with similar or smaller size.
    - Must be unquantized/f32 if you want compatibility (quantized formats may not be fully supported out of the box).
-   - [Get GPT-2 f32 GGUF weights](https://huggingface.co/TheBloke/gpt2-ggml/tree/main) (or convert your own using [gguf tools](https://github.com/ggerganov/llama.cpp/tree/master/examples/convert-hf-to-gguf)).
+   - [Get GPT-2 f32 GGUF weights](https://huggingface.co/ddh0/GPT-2-GGUF/resolve/main/GPT-2-f32.gguf) (or convert your own using [gguf tools](https://github.com/ggerganov/llama.cpp/tree/master/examples/convert-hf-to-gguf)).
 
 2. **Accompanying tokenizer.json**  
    - Download the `tokenizer.json` file that matches your model, usually from the HuggingFace repo.
