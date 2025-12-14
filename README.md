@@ -1,4 +1,4 @@
-# 🤖 Browser Transformer: GGUF + Text Generation
+# Browser Transformer: GGUF + Text Generation
 
 **A complete vanilla JavaScript implementation of a GPT-2 transformer, running entirely in your browser. No server, no Python, no frameworks, no WebGPU—just HTML + JS.**
 
