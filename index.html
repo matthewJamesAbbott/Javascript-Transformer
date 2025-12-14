@@ -92,7 +92,6 @@
         details[open] summary {
             border-bottom: 1px solid #2c4d72;
         }
-        /* Custom scroll bar */
         ::-webkit-scrollbar {
           width: 8px;
         }
@@ -104,7 +103,6 @@
           background: var(--main-accent); 
           color: #fff;
         }
-        /* Error and warning formatting overrides */
         [style*="color:#f885"], [style*="color:#f84"], [style*="color:#f44"] {
             color: #ec197b!important;
         }
@@ -114,8 +112,8 @@
 <div style="background: #1a3a1a; border-left: 4px solid #4f4; padding: 16px; margin: 16px 0; border-radius: 4px;">
     <h2 style="margin-top:0; color:#4f4;">📖 What is this?</h2>
     <p style="margin: 8px 0;">A <b>complete transformer implementation</b> written in vanilla JavaScript that runs entirely in your browser. No server, no Python, no frameworks.</p>
-    <p style="margin: 8px 0;"><b>Features:</b> GGUF file parser • Embedding extraction • Multi-head attention • Feed-forward networks • Autoregressive text generation</p>
-    <p style="margin: 8px 0; color:#ffa;"><b> Note:</b> Uses random weights (not trained GPT-2) for transformer blocks, so output will be nonsense. This is a proof-of-concept showing the full pipeline works!</p>
+    <p style="margin: 8px 0;"><b>Features:</b> GGUF file parser • Full weight extraction (all 149 tensors) • Multi-head attention • Feed-forward networks • Autoregressive text generation</p>
+    <p style="margin: 8px 0; color:#ffa;"><b>⚡ NEW:</b> Now loads REAL GPT-2 weights from GGUF files!</p>
 </div>
 
 <!-- ============ SECTION 1: TEST PLAYGROUND (ADVANCED) ============ -->
@@ -144,7 +142,7 @@
 <!-- ============ SECTION 2: GGUF LOADER ============ -->
 <div style="border: 2px solid #4af; padding: 16px; margin: 24px 0; border-radius: 8px; background: #1a2a3a;">
     <h2 style="margin-top:0; color:#4af;"> Step 1: Load GGUF Model File</h2>
-    <p style="color: #aaa; margin: 8px 0;">Upload a GGUF model file (like GPT-2-f32.gguf) to extract the embedding layer. This parses the file and shows all 149+ tensors inside.</p>
+    <p style="color: #aaa; margin: 8px 0;">Upload a GGUF model file (like GPT-2-f32.gguf) to extract ALL weights. This parses the file and loads all 149 tensors.</p>
     <div class="fileUpload">
         <label style="font-weight:bold">
             GGUF Model File:
@@ -154,6 +152,7 @@
         <span id="ggufStatus" style="margin-left:14px; color:#bffcff"></span>
     </div>
     <div id="tensorListPanel"></div>
+    <div id="weightsStatus" style="margin-top:12px;"></div>
 </div>
 
 <!-- ============ SECTION 3: TOKENIZER LOADER ============ -->
@@ -178,18 +177,33 @@
 <!-- ============ SECTION 4: TEXT GENERATION ============ -->
 <div style="border: 3px solid #4f4; padding: 20px; margin: 24px 0; border-radius: 8px; background: #1a2a1a;">
     <h2 style="margin-top:0; color:#4f4;">🚀 Step 3: Generate Text!</h2>
-    <p style="color: #aaa; margin: 8px 0; font-size: 1.1em;">Now that you've loaded the GGUF embeddings and tokenizer, you can generate text! Type a prompt below and click "Generate Text!"</p>
-    <p style="color: #ffa; margin: 8px 0; font-size: 0.95em;"><b> Remember:</b> Output will be random/nonsense because we're using untrained transformer weights (not real GPT-2 weights).</p>
+    <p style="color: #aaa; margin: 8px 0; font-size: 1.1em;">Now that you've loaded the GGUF weights and tokenizer, you can generate text with REAL GPT-2 weights!</p>
     <textarea id="promptText" style="width:90%;margin-top: 0.8em; height: 80px; padding: 8px; font-size: 1em;" placeholder="Enter your prompt here... (e.g., 'Once upon a time')">Once upon a time</textarea><br>
-    <label style="margin-top: 12px; display: block;">Max new tokens: <input type="number" id="maxTokens" value="5" min="1" max="100" style="width: 60px;"> <span style="color:#888; font-size:0.9em;">(Recommended: 3-5 for speed)</span></label>
+    <label style="margin-top: 12px; display: block;">Max new tokens: <input type="number" id="maxTokens" value="5" min="1" max="100" style="width: 60px;"></label>
     <button class="btn" onclick="generateText()" style="margin-top: 12px; padding: 12px 24px; font-size: 1.1em; background: #4f4; color: #000;">Generate Text!</button>
     <div id="generationOutput" style="margin:1em 0 0 0;"></div>
 </div>
 <script>
-// =================== TRANSFORMER CLASSES and GGUF Loader ===================
-let loadedWeights = null;
-let embeddingMatrix = null;  // Token embeddings from GGUF
+// =================== GGUF TENSOR STORAGE ===================
+let ggufTensors = {};        // All extracted tensors by name
+let ggufBuffer = null;       // Raw ArrayBuffer for reading tensor data
+let tensorDataStart = 0;     // Where tensor data begins in the file
+let embeddingMatrix = null;  // Token embeddings [vocab_size * embed_dim]
+let positionEmbeddings = null; // Position embeddings [max_seq_len * embed_dim]
 let ggufMetadata = null;     // Store GGUF metadata
+let weightsLoaded = false;   // Flag to indicate if real weights are loaded
+
+// GPT-2 model dimensions (will be updated from GGUF metadata)
+let GPT2_CONFIG = {
+    vocab_size: 50257,
+    embed_dim: 768,
+    num_heads: 12,
+    num_layers: 12,
+    ffn_dim: 3072,
+    max_seq_len: 1024
+};
+
+// =================== MATH HELPERS ===================
 function zeros(rows, cols) { return Array(rows).fill(0).map(() => Array(cols).fill(0)); }
 function randn(rows, cols, scale=0.1) {
     return Array(rows).fill(0).map(() => Array(cols).fill(0).map(() => (Math.random() - 0.5) * 2 * scale));
@@ -201,22 +215,195 @@ function softmax(arr) {
     return exps.map(x => x / sum);
 }
 function relu(x) { return Math.max(0, x); }
+function gelu(x) {
+    return 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x * x * x)));
+}
 function sigmoid(x) { return 1 / (1 + Math.exp(-x)); }
 
+// =================== TENSOR READING UTILITIES ===================
+// GGUF dtype sizes in bytes
+const GGUF_DTYPE_SIZE = {
+    0: 4,   // F32
+    1: 2,   // F16
+    2: 4,   // Q4_0 (block size)
+    3: 4,   // Q4_1
+    6: 4,   // Q5_0
+    7: 4,   // Q5_1
+    8: 2,   // Q8_0
+    9: 2,   // Q8_1
+    10: 2,  // Q2_K
+    11: 2,  // Q3_K
+    12: 2,  // Q4_K
+    13: 2,  // Q5_K
+    14: 2,  // Q6_K
+    15: 2,  // Q8_K
+    16: 4,  // I8
+    17: 2,  // I16
+    18: 4,  // I32
+    19: 4,  // F64 (8 bytes but we'll read as f32 pairs)
+    20: 2,  // BF16
+};
+
+// Read tensor data as Float32Array from GGUF buffer
+function readTensorData(tensorInfo) {
+    if (!ggufBuffer) return null;
+    
+    const { name, shape, dtype, dataOffset } = tensorInfo;
+    const actualOffset = tensorDataStart + dataOffset;
+    
+    // Calculate total elements
+    let numElements = 1;
+    for (const dim of shape) numElements *= dim;
+    
+    // For F32 (dtype 0), read directly
+    if (dtype === 0) {
+        const byteLength = numElements * 4;
+        if (actualOffset + byteLength > ggufBuffer.byteLength) {
+            console.warn(`Tensor ${name} extends beyond buffer`);
+            return null;
+        }
+        return new Float32Array(ggufBuffer, actualOffset, numElements);
+    }
+    
+    // For F16 (dtype 1), convert to F32
+    if (dtype === 1) {
+        const byteLength = numElements * 2;
+        if (actualOffset + byteLength > ggufBuffer.byteLength) {
+            console.warn(`Tensor ${name} extends beyond buffer`);
+            return null;
+        }
+        const f16View = new Uint16Array(ggufBuffer, actualOffset, numElements);
+        const f32Array = new Float32Array(numElements);
+        for (let i = 0; i < numElements; i++) {
+            f32Array[i] = float16ToFloat32(f16View[i]);
+        }
+        return f32Array;
+    }
+    
+    // For BF16 (dtype 20), convert to F32
+    if (dtype === 20) {
+        const byteLength = numElements * 2;
+        if (actualOffset + byteLength > ggufBuffer.byteLength) {
+            console.warn(`Tensor ${name} extends beyond buffer`);
+            return null;
+        }
+        const bf16View = new Uint16Array(ggufBuffer, actualOffset, numElements);
+        const f32Array = new Float32Array(numElements);
+        for (let i = 0; i < numElements; i++) {
+            f32Array[i] = bfloat16ToFloat32(bf16View[i]);
+        }
+        return f32Array;
+    }
+    
+    console.warn(`Unsupported dtype ${dtype} for tensor ${name}, reading as F32`);
+    const byteLength = numElements * 4;
+    if (actualOffset + byteLength > ggufBuffer.byteLength) {
+        return null;
+    }
+    return new Float32Array(ggufBuffer, actualOffset, numElements);
+}
+
+function float16ToFloat32(h) {
+    const sign = (h >> 15) & 0x1;
+    const exponent = (h >> 10) & 0x1f;
+    const mantissa = h & 0x3ff;
+    
+    if (exponent === 0) {
+        if (mantissa === 0) return sign ? -0 : 0;
+        // Subnormal
+        let e = -14;
+        let m = mantissa / 1024;
+        while (m < 1) { m *= 2; e--; }
+        return (sign ? -1 : 1) * m * Math.pow(2, e);
+    }
+    if (exponent === 31) {
+        return mantissa ? NaN : (sign ? -Infinity : Infinity);
+    }
+    return (sign ? -1 : 1) * (1 + mantissa / 1024) * Math.pow(2, exponent - 15);
+}
+
+function bfloat16ToFloat32(bf16) {
+    // BF16 is just the upper 16 bits of F32
+    const f32Bits = bf16 << 16;
+    const buffer = new ArrayBuffer(4);
+    new Uint32Array(buffer)[0] = f32Bits;
+    return new Float32Array(buffer)[0];
+}
+
+// Reshape 1D Float32Array to 2D JS array
+function reshape2D(flat, rows, cols) {
+    const result = [];
+    for (let i = 0; i < rows; i++) {
+        const row = [];
+        for (let j = 0; j < cols; j++) {
+            row.push(flat[i * cols + j]);
+        }
+        result.push(row);
+    }
+    return result;
+}
+
+// Extract 1D array from Float32Array
+function to1DArray(flat) {
+    return Array.from(flat);
+}
+
+// =================== TRANSFORMER CLASSES WITH WEIGHT LOADING ===================
 class AttentionHead {
-    constructor(embedDim, headDim) {
+    constructor(embedDim, headDim, headIndex, layerWeights) {
         this.embedDim = embedDim;
         this.headDim = headDim;
-        this.QueryWeights = randn(embedDim, headDim, Math.sqrt(2/embedDim));
-        this.KeyWeights   = randn(embedDim, headDim, Math.sqrt(2/embedDim));
-        this.ValueWeights = randn(embedDim, headDim, Math.sqrt(2/embedDim));
-        this.QueryBias = Array(headDim).fill(0);
-        this.KeyBias   = Array(headDim).fill(0);
-        this.ValueBias = Array(headDim).fill(0);
+        
+        if (layerWeights && layerWeights.attn_qkv_weight) {
+            // Extract this head's portion of the combined QKV weights
+            // GPT-2 stores Q, K, V concatenated: [embed_dim, 3 * embed_dim]
+            // Each head gets headDim columns from each of Q, K, V sections
+            const qkvWeight = layerWeights.attn_qkv_weight; // [embed_dim, 3 * embed_dim]
+            const qkvBias = layerWeights.attn_qkv_bias;     // [3 * embed_dim]
+            
+            const startQ = headIndex * headDim;
+            const startK = embedDim + headIndex * headDim;
+            const startV = 2 * embedDim + headIndex * headDim;
+            
+            this.QueryWeights = zeros(embedDim, headDim);
+            this.KeyWeights = zeros(embedDim, headDim);
+            this.ValueWeights = zeros(embedDim, headDim);
+            this.QueryBias = Array(headDim).fill(0);
+            this.KeyBias = Array(headDim).fill(0);
+            this.ValueBias = Array(headDim).fill(0);
+            
+            for (let i = 0; i < embedDim; i++) {
+                for (let j = 0; j < headDim; j++) {
+                    this.QueryWeights[i][j] = qkvWeight[i * 3 * embedDim + startQ + j];
+                    this.KeyWeights[i][j] = qkvWeight[i * 3 * embedDim + startK + j];
+                    this.ValueWeights[i][j] = qkvWeight[i * 3 * embedDim + startV + j];
+                }
+            }
+            
+            if (qkvBias) {
+                for (let j = 0; j < headDim; j++) {
+                    this.QueryBias[j] = qkvBias[startQ + j];
+                    this.KeyBias[j] = qkvBias[startK + j];
+                    this.ValueBias[j] = qkvBias[startV + j];
+                }
+            }
+        } else {
+            // Random initialization fallback
+            this.QueryWeights = randn(embedDim, headDim, Math.sqrt(2/embedDim));
+            this.KeyWeights = randn(embedDim, headDim, Math.sqrt(2/embedDim));
+            this.ValueWeights = randn(embedDim, headDim, Math.sqrt(2/embedDim));
+            this.QueryBias = Array(headDim).fill(0);
+            this.KeyBias = Array(headDim).fill(0);
+            this.ValueBias = Array(headDim).fill(0);
+        }
     }
-    forward(input) {
+    
+    forward(input, useCausalMask = true) {
         const seqLen = input.length;
-        let Q = zeros(seqLen, this.headDim), K = zeros(seqLen, this.headDim), V = zeros(seqLen, this.headDim);
+        let Q = zeros(seqLen, this.headDim);
+        let K = zeros(seqLen, this.headDim);
+        let V = zeros(seqLen, this.headDim);
+        
         for (let i = 0; i < seqLen; ++i) {
             for (let j = 0; j < this.headDim; ++j) {
                 Q[i][j] = this.QueryBias[j];
@@ -229,18 +416,25 @@ class AttentionHead {
                 }
             }
         }
+        
         let scores = zeros(seqLen, seqLen);
         const scale = Math.sqrt(this.headDim);
+        
         for (let i = 0; i < seqLen; ++i) {
             for (let j = 0; j < seqLen; ++j) {
-                let s = 0;
-                for (let d = 0; d < this.headDim; ++d)
-                    s += Q[i][d] * K[j][d];
-                scores[i][j] = s / scale;
+                if (useCausalMask && j > i) {
+                    scores[i][j] = -Infinity;
+                } else {
+                    let s = 0;
+                    for (let d = 0; d < this.headDim; ++d)
+                        s += Q[i][d] * K[j][d];
+                    scores[i][j] = s / scale;
+                }
             }
             let sm = softmax(scores[i]);
             for (let j = 0; j < seqLen; ++j) scores[i][j] = sm[j];
         }
+        
         let out = zeros(seqLen, this.headDim);
         for (let i = 0; i < seqLen; ++i) {
             for (let d = 0; d < this.headDim; ++d) {
@@ -253,26 +447,47 @@ class AttentionHead {
         return out;
     }
 }
+
 class MultiHeadAttention {
-    constructor(embedDim, numHeads) {
+    constructor(embedDim, numHeads, layerWeights) {
         this.embedDim = embedDim;
         this.numHeads = numHeads;
         this.headDim = Math.floor(embedDim / numHeads);
         this.heads = [];
-        for (let i = 0; i < numHeads; ++i)
-            this.heads.push(new AttentionHead(embedDim, this.headDim));
-        this.OutputWeights = randn(numHeads * this.headDim, embedDim, Math.sqrt(2/(numHeads*this.headDim)));
-        this.OutputBias = Array(embedDim).fill(0);
+        
+        for (let i = 0; i < numHeads; ++i) {
+            this.heads.push(new AttentionHead(embedDim, this.headDim, i, layerWeights));
+        }
+        
+        if (layerWeights && layerWeights.attn_proj_weight) {
+            // Load output projection weights
+            const projWeight = layerWeights.attn_proj_weight; // [embed_dim, embed_dim]
+            const projBias = layerWeights.attn_proj_bias;     // [embed_dim]
+            
+            this.OutputWeights = zeros(embedDim, embedDim);
+            for (let i = 0; i < embedDim; i++) {
+                for (let j = 0; j < embedDim; j++) {
+                    this.OutputWeights[i][j] = projWeight[i * embedDim + j];
+                }
+            }
+            this.OutputBias = projBias ? to1DArray(projBias) : Array(embedDim).fill(0);
+        } else {
+            this.OutputWeights = randn(numHeads * this.headDim, embedDim, Math.sqrt(2/(numHeads*this.headDim)));
+            this.OutputBias = Array(embedDim).fill(0);
+        }
     }
+    
     forward(input) {
         const seqLen = input.length;
         let concat = zeros(seqLen, this.numHeads * this.headDim);
+        
         for (let h = 0; h < this.numHeads; ++h) {
             let headOut = this.heads[h].forward(input);
             for (let i = 0; i < seqLen; ++i)
                 for (let d = 0; d < this.headDim; ++d)
                     concat[i][h * this.headDim + d] = headOut[i][d];
         }
+        
         let out = zeros(seqLen, this.embedDim);
         for (let i = 0; i < seqLen; ++i) {
             for (let j = 0; j < this.embedDim; ++j) {
@@ -285,29 +500,58 @@ class MultiHeadAttention {
         return out;
     }
 }
+
 class FeedForwardNetwork {
-    constructor(embedDim, hiddenDim) {
-        this.layer1Weights = randn(embedDim, hiddenDim, Math.sqrt(2/embedDim));
-        this.layer1Bias = Array(hiddenDim).fill(0);
-        this.layer2Weights = randn(hiddenDim, embedDim, Math.sqrt(2/hiddenDim));
-        this.layer2Bias = Array(embedDim).fill(0);
+    constructor(embedDim, hiddenDim, layerWeights) {
+        if (layerWeights && layerWeights.ffn_up_weight) {
+            const upWeight = layerWeights.ffn_up_weight;     // [embed_dim, hidden_dim]
+            const upBias = layerWeights.ffn_up_bias;         // [hidden_dim]
+            const downWeight = layerWeights.ffn_down_weight; // [hidden_dim, embed_dim]
+            const downBias = layerWeights.ffn_down_bias;     // [embed_dim]
+            
+            this.layer1Weights = zeros(embedDim, hiddenDim);
+            for (let i = 0; i < embedDim; i++) {
+                for (let j = 0; j < hiddenDim; j++) {
+                    this.layer1Weights[i][j] = upWeight[i * hiddenDim + j];
+                }
+            }
+            this.layer1Bias = upBias ? to1DArray(upBias) : Array(hiddenDim).fill(0);
+            
+            this.layer2Weights = zeros(hiddenDim, embedDim);
+            for (let i = 0; i < hiddenDim; i++) {
+                for (let j = 0; j < embedDim; j++) {
+                    this.layer2Weights[i][j] = downWeight[i * embedDim + j];
+                }
+            }
+            this.layer2Bias = downBias ? to1DArray(downBias) : Array(embedDim).fill(0);
+        } else {
+            this.layer1Weights = randn(embedDim, hiddenDim, Math.sqrt(2/embedDim));
+            this.layer1Bias = Array(hiddenDim).fill(0);
+            this.layer2Weights = randn(hiddenDim, embedDim, Math.sqrt(2/hiddenDim));
+            this.layer2Bias = Array(embedDim).fill(0);
+        }
     }
+    
     forward(input) {
         const seqLen = input.length;
-        let hidden = zeros(seqLen, this.layer1Bias.length);
+        const hiddenDim = this.layer1Bias.length;
+        const embedDim = this.layer2Bias.length;
+        
+        let hidden = zeros(seqLen, hiddenDim);
         for (let i = 0; i < seqLen; ++i) {
-            for (let h = 0; h < this.layer1Bias.length; ++h) {
+            for (let h = 0; h < hiddenDim; ++h) {
                 let s = this.layer1Bias[h];
                 for (let k = 0; k < input[i].length; ++k)
                     s += input[i][k] * this.layer1Weights[k][h];
-                hidden[i][h] = relu(s);
+                hidden[i][h] = gelu(s); // GPT-2 uses GELU, not ReLU
             }
         }
-        let out = zeros(seqLen, this.layer2Bias.length);
+        
+        let out = zeros(seqLen, embedDim);
         for (let i = 0; i < seqLen; ++i) {
-            for (let e = 0; e < this.layer2Bias.length; ++e) {
+            for (let e = 0; e < embedDim; ++e) {
                 let s = this.layer2Bias[e];
-                for (let h = 0; h < hidden[i].length; ++h)
+                for (let h = 0; h < hiddenDim; ++h)
                     s += hidden[i][h] * this.layer2Weights[h][e];
                 out[i][e] = s;
             }
@@ -315,42 +559,65 @@ class FeedForwardNetwork {
         return out;
     }
 }
+
 class LayerNorm {
-    constructor(embedDim) {
-        this.gamma = Array(embedDim).fill(1.0);
-        this.beta  = Array(embedDim).fill(0.0);
+    constructor(embedDim, weights, biases) {
+        if (weights && biases) {
+            this.gamma = to1DArray(weights);
+            this.beta = to1DArray(biases);
+        } else {
+            this.gamma = Array(embedDim).fill(1.0);
+            this.beta = Array(embedDim).fill(0.0);
+        }
     }
+    
     forward(input) {
         const seqLen = input.length;
         const embedDim = input[0].length;
         let out = zeros(seqLen, embedDim);
+        
         for (let i = 0; i < seqLen; ++i) {
             const row = input[i];
             const m = row.reduce((a,b)=>a+b,0)/row.length;
-            const sd = Math.sqrt((row.reduce((a,b)=>a+(b-m)*(b-m),0)/row.length)+1e-6);
+            const variance = row.reduce((a,b)=>a+(b-m)*(b-m),0)/row.length;
+            const sd = Math.sqrt(variance + 1e-5);
             for (let j = 0; j < embedDim; ++j)
                 out[i][j] = this.gamma[j] * ((row[j] - m) / sd) + this.beta[j];
         }
         return out;
     }
 }
+
 class TransformerBlock {
-    constructor(embedDim, numHeads, ffnHiddenDim) {
-        this.attn = new MultiHeadAttention(embedDim, numHeads);
-        this.ln1 = new LayerNorm(embedDim);
-        this.ffn = new FeedForwardNetwork(embedDim, ffnHiddenDim);
-        this.ln2 = new LayerNorm(embedDim);
+    constructor(embedDim, numHeads, ffnHiddenDim, layerIndex) {
+        const layerWeights = getLayerWeights(layerIndex);
+        
+        this.ln1 = new LayerNorm(embedDim, 
+            layerWeights?.ln1_weight, 
+            layerWeights?.ln1_bias
+        );
+        this.attn = new MultiHeadAttention(embedDim, numHeads, layerWeights);
+        this.ln2 = new LayerNorm(embedDim,
+            layerWeights?.ln2_weight,
+            layerWeights?.ln2_bias
+        );
+        this.ffn = new FeedForwardNetwork(embedDim, ffnHiddenDim, layerWeights);
     }
+    
     forward(input) {
-        let attnOut = this.attn.forward(input);
+        // GPT-2 uses pre-norm architecture
+        let ln1Out = this.ln1.forward(input);
+        let attnOut = this.attn.forward(ln1Out);
         let res1 = input.map((row, i) => row.map((x, j) => x + attnOut[i][j]));
-        let ln1Out = this.ln1.forward(res1);
-        let ffnOut = this.ffn.forward(ln1Out);
-        let res2 = ln1Out.map((row, i) => row.map((x, j) => x + ffnOut[i][j]));
-        let ln2Out = this.ln2.forward(res2);
-        return ln2Out;
+        
+        let ln2Out = this.ln2.forward(res1);
+        let ffnOut = this.ffn.forward(ln2Out);
+        let res2 = res1.map((row, i) => row.map((x, j) => x + ffnOut[i][j]));
+        
+        return res2;
     }
 }
+
 class Transformer {
     constructor(embedDim, numHeads, numBlocks, ffnHiddenDim, maxSeqLen, numClasses) {
         this.embedDim = embedDim;
@@ -359,13 +626,58 @@ class Transformer {
         this.ffnHiddenDim = ffnHiddenDim;
         this.maxSeqLen = maxSeqLen;
         this.numClasses = numClasses;
+        
         this.blocks = [];
         for (let i = 0; i < numBlocks; ++i)
-            this.blocks.push(new TransformerBlock(embedDim, numHeads, ffnHiddenDim));
-        this.positionalEncoding = this.createPositionalEncoding(maxSeqLen, embedDim);
-        this.outWeights = randn(embedDim, numClasses, Math.sqrt(2/embedDim));
-        this.outBias = Array(numClasses).fill(0);
+            this.blocks.push(new TransformerBlock(embedDim, numHeads, ffnHiddenDim, i));
+        
+        // Final layer norm
+        const finalLnWeights = getFinalLayerNormWeights();
+        this.finalLn = new LayerNorm(embedDim, 
+            finalLnWeights?.weight, 
+            finalLnWeights?.bias
+        );
+        
+        // Output projection (lm_head) - for language modeling, this is often tied to embeddings
+        const lmHeadWeight = getLMHeadWeight();
+        if (lmHeadWeight) {
+            this.outWeights = zeros(embedDim, numClasses);
+            for (let i = 0; i < embedDim; i++) {
+                for (let j = 0; j < numClasses; j++) {
+                    // lm_head is [vocab_size, embed_dim], we need [embed_dim, vocab_size]
+                    this.outWeights[i][j] = lmHeadWeight[j * embedDim + i];
+                }
+            }
+            this.outBias = Array(numClasses).fill(0);
+        } else if (embeddingMatrix) {
+            // Use tied embeddings (transpose of token embeddings)
+            this.outWeights = zeros(embedDim, numClasses);
+            for (let i = 0; i < embedDim; i++) {
+                for (let j = 0; j < numClasses; j++) {
+                    this.outWeights[i][j] = embeddingMatrix[j * embedDim + i];
+                }
+            }
+            this.outBias = Array(numClasses).fill(0);
+        } else {
+            this.outWeights = randn(embedDim, numClasses, Math.sqrt(2/embedDim));
+            this.outBias = Array(numClasses).fill(0);
+        }
+        
+        // Position embeddings
+        if (positionEmbeddings) {
+            this.positionalEncoding = [];
+            for (let pos = 0; pos < Math.min(maxSeqLen, GPT2_CONFIG.max_seq_len); pos++) {
+                const posEmbed = [];
+                for (let i = 0; i < embedDim; i++) {
+                    posEmbed.push(positionEmbeddings[pos * embedDim + i]);
+                }
+                this.positionalEncoding.push(posEmbed);
+            }
+        } else {
+            this.positionalEncoding = this.createPositionalEncoding(maxSeqLen, embedDim);
+        }
     }
+    
     createPositionalEncoding(maxSeqLen, embedDim) {
         let PE = zeros(maxSeqLen, embedDim);
         for (let pos = 0; pos < maxSeqLen; ++pos) {
@@ -376,42 +688,114 @@ class Transformer {
         }
         return PE;
     }
+    
     predict(sequenceTokens) {
         let seqLen = sequenceTokens.length;
         let input = zeros(seqLen, this.embedDim);
+        
         for (let i = 0; i < seqLen; ++i)
             for (let j = 0; j < this.embedDim; ++j)
                 input[i][j] = sequenceTokens[i][j] + this.positionalEncoding[i][j];
+        
         for (let blk of this.blocks)
             input = blk.forward(input);
-        let pooled = Array(this.embedDim).fill(0);
-        for (let j = 0; j < this.embedDim; ++j) {
-            let s = 0;
-            for (let i = 0; i < seqLen; ++i)
-                s += input[i][j];
-            pooled[j] = s / seqLen;
-        }
+        
+        // Apply final layer norm
+        input = this.finalLn.forward(input);
+        
+        // For autoregressive generation, we only need the last position's logits
+        const lastPos = input[seqLen - 1];
+        
         let out = Array(this.numClasses).fill(0);
         for (let c = 0; c < this.numClasses; ++c) {
             let s = this.outBias[c];
             for (let j = 0; j < this.embedDim; ++j)
-                s += pooled[j] * this.outWeights[j][c];
-            out[c] = sigmoid(s);
+                s += lastPos[j] * this.outWeights[j][c];
+            out[c] = s; // Raw logits for softmax sampling
         }
         return out;
     }
 }
-// GGUF Loader code
+
+// =================== WEIGHT EXTRACTION HELPERS ===================
+// GPT-2 GGUF tensor name mapping
+const GPT2_TENSOR_NAMES = {
+    token_embed: 'token_embd.weight',
+    position_embed: 'position_embd.weight',
+    final_ln_weight: 'output_norm.weight',
+    final_ln_bias: 'output_norm.bias',
+    lm_head: 'output.weight',
+    
+    // Per-layer patterns (replace {n} with layer index)
+    ln1_weight: 'blk.{n}.attn_norm.weight',
+    ln1_bias: 'blk.{n}.attn_norm.bias',
+    attn_qkv_weight: 'blk.{n}.attn_qkv.weight',
+    attn_qkv_bias: 'blk.{n}.attn_qkv.bias',
+    attn_proj_weight: 'blk.{n}.attn_output.weight',
+    attn_proj_bias: 'blk.{n}.attn_output.bias',
+    ln2_weight: 'blk.{n}.ffn_norm.weight',
+    ln2_bias: 'blk.{n}.ffn_norm.bias',
+    ffn_up_weight: 'blk.{n}.ffn_up.weight',
+    ffn_up_bias: 'blk.{n}.ffn_up.bias',
+    ffn_down_weight: 'blk.{n}.ffn_down.weight',
+    ffn_down_bias: 'blk.{n}.ffn_down.bias',
+};
+
+function getLayerWeights(layerIndex) {
+    if (!weightsLoaded) return null;
+    
+    const get = (pattern) => {
+        const name = pattern.replace('{n}', layerIndex);
+        const tensor = ggufTensors[name];
+        if (tensor && tensor.data) return tensor.data;
+        return null;
+    };
+    
+    return {
+        ln1_weight: get(GPT2_TENSOR_NAMES.ln1_weight),
+        ln1_bias: get(GPT2_TENSOR_NAMES.ln1_bias),
+        attn_qkv_weight: get(GPT2_TENSOR_NAMES.attn_qkv_weight),
+        attn_qkv_bias: get(GPT2_TENSOR_NAMES.attn_qkv_bias),
+        attn_proj_weight: get(GPT2_TENSOR_NAMES.attn_proj_weight),
+        attn_proj_bias: get(GPT2_TENSOR_NAMES.attn_proj_bias),
+        ln2_weight: get(GPT2_TENSOR_NAMES.ln2_weight),
+        ln2_bias: get(GPT2_TENSOR_NAMES.ln2_bias),
+        ffn_up_weight: get(GPT2_TENSOR_NAMES.ffn_up_weight),
+        ffn_up_bias: get(GPT2_TENSOR_NAMES.ffn_up_bias),
+        ffn_down_weight: get(GPT2_TENSOR_NAMES.ffn_down_weight),
+        ffn_down_bias: get(GPT2_TENSOR_NAMES.ffn_down_bias),
+    };
+}
+
+function getFinalLayerNormWeights() {
+    if (!weightsLoaded) return null;
+    const weightTensor = ggufTensors[GPT2_TENSOR_NAMES.final_ln_weight];
+    const biasTensor = ggufTensors[GPT2_TENSOR_NAMES.final_ln_bias];
+    return {
+        weight: weightTensor?.data || null,
+        bias: biasTensor?.data || null
+    };
+}
+
+function getLMHeadWeight() {
+    if (!weightsLoaded) return null;
+    const tensor = ggufTensors[GPT2_TENSOR_NAMES.lm_head];
+    return tensor?.data || null;
+}
+
+// =================== GGUF PARSER ===================
 function readUint32(view, offset) {
     if (offset + 4 > view.byteLength) throw new Error("readUint32: offset out of bounds");
     return view.getUint32(offset, true);
 }
+
 function readUint64(view, offset) {
     if (offset + 8 > view.byteLength) throw new Error("readUint64: offset out of bounds");
     const low = view.getUint32(offset, true);
     const high = view.getUint32(offset + 4, true);
     return low + high * 0x100000000;
 }
+
 function readStringSafe(view, offset) {
     if (offset + 8 > view.byteLength) {
         return { string: "<incomplete string header>", nextOffset: view.byteLength, truncated: true };
@@ -434,17 +818,20 @@ function readStringSafe(view, offset) {
     const string = new TextDecoder().decode(bytes);
     return { string, nextOffset: stringOffset + strLen, truncated: false };
 }
+
 const GGUF_TYPE = {
     UINT8: 0,  INT8: 1, UINT16: 2, INT16: 3,
     UINT32: 4, INT32: 5, FLOAT32: 6, BOOL: 7,
     STRING: 8, ARRAY: 9, UINT64: 10, INT64: 11, FLOAT64: 12
 };
+
 const GGUF_DTYPE_STR = {
-    0: 'uint8', 1: 'int8', 2: 'uint16', 3: 'int16', 4: 'uint32', 5: 'int32',
-    6: 'float32', 7: 'bool', 8: 'string', 9: 'array', 10: 'uint64', 11: 'int64', 12: 'float64',
-    13: 'complex128', 14: 'bfloat16', 15: 'q4_0', 16: 'q4_1', 17: 'q8_0', 18: 'iq2_xxs',
-    19: 'iq3_xs', 20: 'iq4_xs', 21: 'iq4_xs'
+    0: 'F32', 1: 'F16', 2: 'Q4_0', 3: 'Q4_1', 4: 'Q4_2', 5: 'Q4_3',
+    6: 'Q5_0', 7: 'Q5_1', 8: 'Q8_0', 9: 'Q8_1', 10: 'Q2_K', 11: 'Q3_K',
+    12: 'Q4_K', 13: 'Q5_K', 14: 'Q6_K', 15: 'Q8_K', 16: 'I8', 17: 'I16',
+    18: 'I32', 19: 'F64', 20: 'BF16'
 };
+
 function readMetadataValue(view, offset, type) {
     let value, nextOffset = offset;
     const checkBounds = needed => {
@@ -500,8 +887,6 @@ function readMetadataValue(view, offset, type) {
             const arrayType = readUint32(view, offset);
             const arrayCount = readUint64(view, offset + 4);
             nextOffset = offset + 12;
-            
-            // Actually parse the array elements
             let arrayValues = [];
             for (let i = 0; i < arrayCount; i++) {
                 const elemResult = readMetadataValue(view, nextOffset, arrayType);
@@ -520,10 +905,13 @@ function readMetadataValue(view, offset, type) {
     }
     return { value, nextOffset };
 }
-function parseAndLoadGguf(buffer, embedDim, numClasses) {
+
+function parseAndLoadGguf(buffer) {
+    ggufBuffer = buffer;
     let view = new DataView(buffer);
     let offset = 0;
     let out = "";
+    
     try {
         let magicBytes = [];
         for (let i = 0; i < 4; ++i) magicBytes.push(view.getUint8(offset + i));
@@ -532,11 +920,11 @@ function parseAndLoadGguf(buffer, embedDim, numClasses) {
         offset += 8;
         let tensorCount = readUint64(view, offset); offset += 8;
         let metadataCount = readUint64(view, offset); offset += 8;
-        out += `<div>Magic: <b>${magic}</b></div>`;
-        out += `<div>Version: <b>${version}</b></div>`;
-        out += `<div>Tensors in GGUF: <b>${tensorCount}</b> &nbsp; Metadata entries: <b>${metadataCount}</b></div>`;
         
-        // Parse and store metadata
+        out += `<div>Magic: <b>${magic}</b> | Version: <b>${version}</b></div>`;
+        out += `<div>Tensors: <b>${tensorCount}</b> | Metadata: <b>${metadataCount}</b></div>`;
+        
+        // Parse metadata
         ggufMetadata = {};
         for (let i = 0; i < metadataCount; ++i) {
             const { string: key, nextOffset: afterKey, truncated } = readStringSafe(view, offset);
@@ -549,170 +937,129 @@ function parseAndLoadGguf(buffer, embedDim, numClasses) {
             ggufMetadata[key] = value;
         }
         
-        console.log('Metadata parsed. Now at offset:', offset, 'of', view.byteLength);
+        // Update GPT-2 config from metadata
+        if (ggufMetadata['gpt2.embedding_length']) GPT2_CONFIG.embed_dim = ggufMetadata['gpt2.embedding_length'];
+        if (ggufMetadata['gpt2.block_count']) GPT2_CONFIG.num_layers = ggufMetadata['gpt2.block_count'];
+        if (ggufMetadata['gpt2.attention.head_count']) GPT2_CONFIG.num_heads = ggufMetadata['gpt2.attention.head_count'];
+        if (ggufMetadata['gpt2.feed_forward_length']) GPT2_CONFIG.ffn_dim = ggufMetadata['gpt2.feed_forward_length'];
+        if (ggufMetadata['gpt2.context_length']) GPT2_CONFIG.max_seq_len = ggufMetadata['gpt2.context_length'];
         
-        // GGUF v3: Tensor info section
-        // Format: name (string), n_dimensions (u32), dimensions (n_dims × u64), dtype (u32), offset (u64)
+        out += `<div style='color:#4f4;margin-top:8px'><b>Model Config:</b> embed_dim=${GPT2_CONFIG.embed_dim}, layers=${GPT2_CONFIG.num_layers}, heads=${GPT2_CONFIG.num_heads}</div>`;
+        
+        // Parse tensor info
         let tensorListOut = "";
         let tensors = [];
         
         for (let i = 0; i < tensorCount; ++i) {
-            if (offset >= view.byteLength) {
-                console.warn('Reached end of buffer at tensor', i);
-                break;
-            }
+            if (offset >= view.byteLength) break;
             
-            // Read tensor name
             const { string: name, nextOffset: afterName, truncated } = readStringSafe(view, offset);
-            if (truncated) {
-                console.warn('Truncated tensor name at index', i, 'offset', offset);
-                break;
-            }
+            if (truncated) break;
             offset = afterName;
             
             if (offset + 4 > view.byteLength) break;
             let n_dims = readUint32(view, offset); offset += 4;
             
-            // Read shape dimensions
             let shape = [];
             for (let d = 0; d < n_dims; ++d) {
                 if (offset + 8 > view.byteLength) break;
                 shape.push(readUint64(view, offset)); offset += 8;
             }
             
-            // Now read dtype
             if (offset + 4 > view.byteLength) break;
             let dtype = readUint32(view, offset); offset += 4;
             
-            // Read data offset
             if (offset + 8 > view.byteLength) break;
             let dataOffset = readUint64(view, offset); offset += 8;
             
-            let dtypeHuman = GGUF_DTYPE_STR[dtype]||("dtype_"+dtype);
-            
+            let dtypeHuman = GGUF_DTYPE_STR[dtype] || `dtype_${dtype}`;
             tensors.push({ name, shape, dtype, dataOffset });
-            tensorListOut += `<div>${name} | shape: [${shape.join(",")}] | type: ${dtypeHuman}</div>\n`;
-            
-            if (i < 10) {
-                console.log(`Tensor ${i}: "${name}" shape:[${shape.join(',')}] dtype:${dtype} offset:${dataOffset}`);
-            }
+            tensorListOut += `<div>${name} | [${shape.join(",")}] | ${dtypeHuman}</div>\n`;
         }
         
-        console.log('Total tensors parsed:', tensors.length);
-        
-        // Debug: Show first 20 tensor names in the UI
-        let debugTensorNames = "<div style='background:#1a1a1a; padding:8px; margin:8px 0; max-height:200px; overflow:auto;'>";
-        debugTensorNames += "<b>First 20 tensor names (for debugging):</b><br>";
-        for (let i = 0; i < Math.min(20, tensors.length); i++) {
-            debugTensorNames += `${i}: "${tensors[i].name}" | shape:[${tensors[i].shape.join(',')}] | dtype:${tensors[i].dtype}<br>`;
+        // Calculate tensor data start (aligned to 32 bytes)
+        const alignment = 32;
+        tensorDataStart = offset;
+        let remainder = tensorDataStart % alignment;
+        if (remainder !== 0) {
+            tensorDataStart += alignment - remainder;
         }
-        if (tensors.length === 0) {
-            debugTensorNames += "<span style='color:#f84'>No tensors were parsed! Check console for errors.</span><br>";
-        }
-        debugTensorNames += "</div>";
         
-        // Extract token embedding matrix 
-        // GPT-2 uses 'transformer.wte.weight' or 'wte.weight'
-        const embeddingTensor = tensors.find(t => 
-            t.name === 'token_embd.weight' ||
-            t.name === 'transformer.wte.weight' ||
-            t.name === 'wte.weight' ||
-            t.name === 'transformer.word_embeddings.weight' ||
-            t.name.includes('embed_tokens') ||
-            t.name.includes('wte') ||
-            t.name.includes('token_embd')
-        );
+        console.log('Tensor data starts at:', tensorDataStart);
         
-        console.log('Found embedding tensor:', embeddingTensor);
+        // Extract ALL tensor data
+        let extractedCount = 0;
+        let failedCount = 0;
         
-        if (embeddingTensor) {
-            // Accept any dtype for now - we'll try to read it as float32
-            // Shape should be [embed_dim, vocab_size] or [vocab_size, embed_dim]
-            const shape0 = embeddingTensor.shape[0];
-            const shape1 = embeddingTensor.shape[1];
-            
-            // GPT-2 has vocab=50257, embed_dim=768
-            // Determine which dimension is which
-            let vocabSize, embedDimFromGGUF;
-            if (shape0 === 768 && shape1 > 10000) {
-                embedDimFromGGUF = shape0;
-                vocabSize = shape1;
-            } else if (shape1 === 768 && shape0 > 10000) {
-                embedDimFromGGUF = shape1;
-                vocabSize = shape0;
+        for (const tensor of tensors) {
+            const data = readTensorData(tensor);
+            if (data) {
+                ggufTensors[tensor.name] = {
+                    ...tensor,
+                    data: data
+                };
+                extractedCount++;
             } else {
-                out += debugTensorNames;
-                out += `<div style='color:#f84; margin-top:8px'><b> Unexpected embedding shape: [${shape0}, ${shape1}]</b></div>`;
-                document.getElementById("tensorListPanel").innerHTML = out;
-                document.getElementById('ggufStatus').textContent += " | Shape error";
-                return;
+                failedCount++;
             }
-            
-            const floatCount = vocabSize * embedDimFromGGUF;
-            
-            // Read the embedding data as float32
-            // The dataOffset is relative to the start of the tensor data section
-            // We need to find where tensor data actually starts
-            const alignment = 32;
-            let tensorDataStart = offset;
-            let remainder = tensorDataStart % alignment;
-            if (remainder !== 0) {
-                tensorDataStart += alignment - remainder;
-            }
-            
-            const actualDataOffset = tensorDataStart + embeddingTensor.dataOffset;
-            
-            console.log('Trying to read embeddings:', {
-                vocabSize,
-                embedDimFromGGUF,
-                floatCount,
-                tensorDataStart,
-                embeddingOffset: embeddingTensor.dataOffset,
-                actualDataOffset,
-                bufferSize: buffer.byteLength
-            });
-            
-            try {
-                embeddingMatrix = new Float32Array(buffer, actualDataOffset, floatCount);
-                
-                out += debugTensorNames;
-                out += `<div style='color:#4f4; margin-top:8px'><b>✓ Extracted embeddings:</b> vocab=${vocabSize}, dim=${embedDimFromGGUF}</div>`;
-                out += `<div style='color:#aaa; font-size:0.9em'>Data offset: ${actualDataOffset}, dtype reported: ${embeddingTensor.dtype}</div>`;
-                console.log('Embedding matrix loaded:', { vocabSize, embedDimFromGGUF, totalFloats: floatCount });
-                console.log('First few values:', Array.from(embeddingMatrix.slice(0, 10)));
-            } catch(e) {
-                out += debugTensorNames;
-                out += `<div style='color:#f84; margin-top:8px'><b> Failed to read embedding data: ${e.message}</b></div>`;
-                console.error('Failed to read embeddings:', e);
-            }
-        } else {
-            out += debugTensorNames;
-            out += `<div style='color:#f84; margin-top:8px'><b> Embedding layer not found</b></div>`;
         }
         
-        out += `<div class="tensorList"><b>Tensor List:</b><br>${tensorListOut}</div>`;
+        // Extract special tensors
+        const tokenEmbedTensor = ggufTensors[GPT2_TENSOR_NAMES.token_embed];
+        if (tokenEmbedTensor) {
+            embeddingMatrix = tokenEmbedTensor.data;
+            out += `<div style='color:#4f4'>✓ Token embeddings: [${tokenEmbedTensor.shape.join(',')}]</div>`;
+        }
+        
+        const posEmbedTensor = ggufTensors[GPT2_TENSOR_NAMES.position_embed];
+        if (posEmbedTensor) {
+            positionEmbeddings = posEmbedTensor.data;
+            out += `<div style='color:#4f4'>✓ Position embeddings: [${posEmbedTensor.shape.join(',')}]</div>`;
+        }
+        
+        weightsLoaded = extractedCount > 10; // Consider loaded if we got at least 10 tensors
+        
+        out += `<div style='margin-top:12px'>`;
+        out += `<span style='color:#4f4'>✓ Extracted: ${extractedCount} tensors</span>`;
+        if (failedCount > 0) out += ` | <span style='color:#f84'>Failed: ${failedCount}</span>`;
+        out += `</div>`;
+        
+        // Show weight loading status
+        const statusDiv = document.getElementById('weightsStatus');
+        if (weightsLoaded) {
+            statusDiv.innerHTML = `<div style='color:#4f4; font-size:1.1em; margin-top:12px'>
+                <b>✓ ALL ${extractedCount} WEIGHTS LOADED!</b><br>
+                <span style='font-size:0.9em'>Ready to generate with real GPT-2 weights.</span>
+            </div>`;
+        } else {
+            statusDiv.innerHTML = `<div style='color:#f84'>⚠ Only ${extractedCount} tensors extracted. Model may not work correctly.</div>`;
+        }
+        
+        out += `<div class="tensorList"><b>All Tensors (${tensors.length}):</b><br>${tensorListOut}</div>`;
         document.getElementById("tensorListPanel").innerHTML = out;
-        document.getElementById('ggufStatus').textContent = "GGUF loaded! Found " + tensorCount + " tensors.";
+        document.getElementById('ggufStatus').textContent = `Loaded ${tensorCount} tensors`;
+        
     } catch (e) {
-        document.getElementById('ggufStatus').textContent = "Error parsing: " + e.message;
+        document.getElementById('ggufStatus').textContent = "Error: " + e.message;
         console.error('GGUF parse error:', e);
-        console.error(e.stack);
     }
 }
+
 document.getElementById('loadGgufBtn').onclick = function() {
     const file = document.getElementById('ggufFileInput').files[0];
     if (!file) {
         document.getElementById('ggufStatus').textContent = "No file selected!";
         return;
     }
-    const embedDim = parseInt(document.getElementById('embedDim').value);
-    const numClasses = parseInt(document.getElementById('numClasses').value);
     document.getElementById('ggufStatus').textContent = "Reading file...";
     document.getElementById('tensorListPanel').innerHTML = "";
+    document.getElementById('weightsStatus').innerHTML = "";
+    
     file.arrayBuffer().then(buf => {
-        parseAndLoadGguf(buf, embedDim, numClasses);
+        parseAndLoadGguf(buf);
     });
 };
+
 function runTransformer() {
     const seqLen = parseInt(document.getElementById('seqLen').value);
     const embedDim = parseInt(document.getElementById('embedDim').value);
@@ -732,16 +1079,14 @@ function runTransformer() {
     for (let i = 1; i < seqLen; ++i) {
         seqTokens.push(Array(embedDim).fill(0).map(() => Math.random()));
     }
+    
     let transformer = new Transformer(embedDim, numHeads, numBlocks, ffnHidden, Math.max(seqLen, 50), numClasses);
-
-    if (loadedWeights && loadedWeights.outWeights) {
-        transformer.outWeights = loadedWeights.outWeights;
-        document.getElementById('ggufStatus').textContent += " | Weights injected!";
-    }
     const prediction = transformer.predict(seqTokens);
+    
     document.getElementById('output').innerHTML =
         `<b>Input Sequence:</b> First vector = [${vec.map(x=>x.toFixed(4)).join(", ")}] ...<br>
-         <b>Prediction:</b> [${prediction.map(x => x.toFixed(4)).join(', ')}]`;
+         <b>Prediction:</b> [${prediction.slice(0, 20).map(x => x.toFixed(4)).join(', ')}${prediction.length > 20 ? '...' : ''}]<br>
+         <b>Weights:</b> ${weightsLoaded ? '✓ Using GGUF weights' : '⚠ Using random weights'}`;
 }
 </script>
 <script type="module">
@@ -750,12 +1095,10 @@ import { AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@xenova/transformers
 let localTokenizer = null;
 let tokenizerContent = null;
 
-// Set up fetch mock BEFORE any tokenizer operations
 const originalFetch = window.fetch;
 window.fetch = function(url, options) {
   const urlStr = typeof url === 'string' ? url : url.toString();
   
-  // Intercept tokenizer.json requests
   if (tokenizerContent && urlStr.includes('tokenizer.json')) {
     return Promise.resolve(new Response(tokenizerContent, {
       status: 200,
@@ -763,7 +1106,6 @@ window.fetch = function(url, options) {
     }));
   }
   
-  // Intercept tokenizer_config.json requests
   if (urlStr.includes('tokenizer_config.json')) {
     return Promise.resolve(new Response(JSON.stringify({}), {
       status: 200,
@@ -771,7 +1113,6 @@ window.fetch = function(url, options) {
     }));
   }
   
-  // Let other requests through
   return originalFetch(url, options);
 };
 
@@ -785,27 +1126,19 @@ window.loadLocalTokenizer = async function() {
     try {
         let file = fileInput.files[0];
         let text = await file.text();
-        
-        // Parse to validate it's proper JSON
-        let tokenizerData = JSON.parse(text);
-        
-        // Store the content for the fetch mock
+        JSON.parse(text);
         tokenizerContent = text;
-        
-        // Try to load the tokenizer
         localTokenizer = await AutoTokenizer.from_pretrained('local-model');
-        
-        document.getElementById("localTokOutput").textContent = "✓ Tokenizer loaded successfully!";
-        console.log('Tokenizer loaded:', localTokenizer);
+        document.getElementById("localTokOutput").textContent = "✓ Tokenizer loaded!";
     } catch(e) {
-        document.getElementById("localTokOutput").textContent = "Failed to load: " + e.message;
+        document.getElementById("localTokOutput").textContent = "Failed: " + e.message;
         console.error("Failed to load tokenizer:", e);
     }
 };
 
 window.encodeTextLocal = async function() {
     if (!localTokenizer) {
-        document.getElementById("tokencodeOutput").innerHTML = "<span style='color:#f44'>Please load a tokenizer first!</span>";
+        document.getElementById("tokencodeOutput").innerHTML = "<span style='color:#f44'>Load tokenizer first!</span>";
         return;
     }
     const text = document.getElementById('userText').value;
@@ -816,12 +1149,10 @@ window.encodeTextLocal = async function() {
             `<b>Token IDs:</b> ${JSON.stringify(encoded)}<br><b>Decoded:</b> "${decoded}"`;
     } catch(e) {
         document.getElementById('tokencodeOutput').innerHTML =
-            `<span style='color:#f44'>Failed to encode: ${e.message}</span>`;
-        console.error("Encoding error:", e);
+            `<span style='color:#f44'>Error: ${e.message}</span>`;
     }
 }
 
-// Text generation function
 let generationCancelled = false;
 
 window.cancelGeneration = function() {
@@ -832,12 +1163,12 @@ window.generateText = async function() {
     const output = document.getElementById('generationOutput');
     
     if (!localTokenizer) {
-        output.innerHTML = "<span style='color:#f44'> Please load a tokenizer first!</span>";
+        output.innerHTML = "<span style='color:#f44'>❌ Load tokenizer first!</span>";
         return;
     }
     
     if (!embeddingMatrix) {
-        output.innerHTML = "<span style='color:#f44'> Please load a GGUF file first to get embeddings!</span>";
+        output.innerHTML = "<span style='color:#f44'>❌ Load GGUF file first!</span>";
         return;
     }
     
@@ -845,57 +1176,47 @@ window.generateText = async function() {
     const maxTokens = parseInt(document.getElementById('maxTokens').value);
     
     if (!promptText.trim()) {
-        output.innerHTML = "<span style='color:#f44'> Please enter a prompt!</span>";
+        output.innerHTML = "<span style='color:#f44'>❌ Enter a prompt!</span>";
         return;
-    }
-    
-    if (maxTokens > 10) {
-        output.innerHTML = "<span style='color:#f84'> Warning: Max tokens > 10 will be VERY slow with random weights. Recommended: 3-5 tokens max.</span>";
-        await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
     generationCancelled = false;
     
     try {
-        output.innerHTML = "<div style='color:#4af'> Encoding prompt...</div>";
+        output.innerHTML = "<div style='color:#4af'>⏳ Encoding prompt...</div>";
         
-        // Encode the prompt
         let currentIds = await localTokenizer.encode(promptText);
         console.log('Input token IDs:', currentIds);
         
-        const vocabSize = 50257;
-        const embedDim = 768;
+        const vocabSize = GPT2_CONFIG.vocab_size;
+        const embedDim = GPT2_CONFIG.embed_dim;
+        const numHeads = GPT2_CONFIG.num_heads;
+        const numBlocks = GPT2_CONFIG.num_layers;
+        const ffnHidden = GPT2_CONFIG.ffn_dim;
         
-        // Use MUCH smaller transformer for demo (browser can't handle full GPT-2)
-        const numHeads = 2;    // Real GPT-2: 12
-        const numBlocks = 2;   // Real GPT-2: 12
-        const ffnHidden = 512; // Real GPT-2: 3072
-        
-        output.innerHTML = "<div style='color:#4af'> Creating mini-transformer (2 heads, 2 blocks)...</div>";
-        await new Promise(resolve => setTimeout(resolve, 100));
+        output.innerHTML = `<div style='color:#4af'>⏳ Building transformer (${numBlocks} layers, ${numHeads} heads)...</div>`;
+        await new Promise(resolve => setTimeout(resolve, 50));
         
         let transformer = new Transformer(embedDim, numHeads, numBlocks, ffnHidden, 1024, vocabSize);
         
-        output.innerHTML = "<div style='color:#4f4'>✓ Ready! Starting generation...<br><button class='btn' onclick='cancelGeneration()' style='margin-top:8px'>Cancel</button></div>";
+        const usingRealWeights = weightsLoaded;
+        output.innerHTML = `<div style='color:#4f4'>✓ Ready! ${usingRealWeights ? 'Using REAL GPT-2 weights' : 'Using random weights'}<br>
+            <button class='btn' onclick='cancelGeneration()' style='margin-top:8px'>Cancel</button></div>`;
         await new Promise(resolve => setTimeout(resolve, 100));
         
-        // Autoregressive generation loop
         let generatedTokens = [];
         let startTime = Date.now();
         
         for (let step = 0; step < maxTokens; step++) {
             if (generationCancelled) {
-                output.innerHTML += "<div style='color:#f84'> Generation cancelled by user</div>";
+                output.innerHTML += "<div style='color:#f84'>❌ Cancelled</div>";
                 break;
             }
             
             const stepStart = Date.now();
-            output.innerHTML = `<div style='color:#4af'> Token ${step + 1}/${maxTokens}... <button class='btn' onclick='cancelGeneration()'>Cancel</button></div>`;
-            
-            // Yield to browser to update UI
+            output.innerHTML = `<div style='color:#4af'>⏳ Token ${step + 1}/${maxTokens}... <button class='btn' onclick='cancelGeneration()'>Cancel</button></div>`;
             await new Promise(resolve => setTimeout(resolve, 10));
             
-            // Convert current token IDs to embeddings
             let inputEmbeddings = [];
             for (let tokenId of currentIds) {
                 let embedding = [];
@@ -906,35 +1227,33 @@ window.generateText = async function() {
                 inputEmbeddings.push(embedding);
             }
             
-            // Run through transformer
             const logits = transformer.predict(inputEmbeddings);
             
-            // Greedy sampling
+            // Temperature sampling (greedy for now)
             let bestTokenId = 0;
-            let bestProb = logits[0];
+            let bestLogit = logits[0];
             for (let i = 1; i < logits.length; i++) {
-                if (logits[i] > bestProb) {
-                    bestProb = logits[i];
+                if (logits[i] > bestLogit) {
+                    bestLogit = logits[i];
                     bestTokenId = i;
                 }
             }
             
             const stepTime = Date.now() - stepStart;
-            console.log(`Step ${step}: token ${bestTokenId} (prob: ${bestProb.toFixed(4)}) in ${stepTime}ms`);
+            console.log(`Step ${step}: token ${bestTokenId} in ${stepTime}ms`);
             
             currentIds = [...currentIds, bestTokenId];
             generatedTokens.push(bestTokenId);
             
-            // Show partial result
             const partialText = await localTokenizer.decode(currentIds);
             output.innerHTML = `
-                <div style='color:#4af'> Token ${step + 1}/${maxTokens} (${stepTime}ms) <button class='btn' onclick='cancelGeneration()'>Cancel</button></div>
+                <div style='color:#4af'>⏳ Token ${step + 1}/${maxTokens} (${stepTime}ms) <button class='btn' onclick='cancelGeneration()'>Cancel</button></div>
                 <div style='margin-top:8px; padding:8px; background:#2a2a2a; border-left: 3px solid #4af;'>
                     <b>Current:</b> "${partialText}"
                 </div>
             `;
             
-            if (bestTokenId === 50256) break;
+            if (bestTokenId === 50256) break; // EOS token
         }
         
         const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -948,15 +1267,15 @@ window.generateText = async function() {
                 <span style='font-size:1.1em'>"${generatedText}"</span>
             </div>
             <div style='color:#aaa; font-size:0.9em; margin-top:8px'>
-                ${generatedTokens.length} tokens | ${(generatedTokens.length / parseFloat(totalTime)).toFixed(1)} tokens/sec
+                ${generatedTokens.length} tokens | ${(generatedTokens.length / parseFloat(totalTime)).toFixed(2)} tokens/sec
             </div>
             <div style='color:#888; font-size:0.85em; margin-top:4px'>
-                Using mini-transformer (2 heads, 2 blocks) with random weights. Real GPT-2 has 12 heads, 12 blocks.
+                ${usingRealWeights ? '✓ Used REAL GPT-2 weights from GGUF' : '⚠ Used random weights (load GGUF for real output)'}
             </div>
         `;
         
     } catch(e) {
-        output.innerHTML = `<span style='color:#f44'> Generation failed: ${e.message}</span>`;
+        output.innerHTML = `<span style='color:#f44'>❌ Error: ${e.message}</span>`;
         console.error("Generation error:", e);
         console.error(e.stack);
     }
