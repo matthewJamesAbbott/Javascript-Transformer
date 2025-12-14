@@ -356,10 +356,10 @@ class AttentionHead {
         
         if (layerWeights && layerWeights.attn_qkv_weight) {
             // Extract this head's portion of the combined QKV weights
-            // GPT-2 stores Q, K, V concatenated: [embed_dim, 3 * embed_dim]
-            // Each head gets headDim columns from each of Q, K, V sections
-            const qkvWeight = layerWeights.attn_qkv_weight; // [embed_dim, 3 * embed_dim]
-            const qkvBias = layerWeights.attn_qkv_bias;     // [3 * embed_dim]
+            // GGUF stores as [3 * embed_dim, embed_dim] (output_dim, input_dim)
+            // Each head gets headDim rows from each of Q, K, V sections
+            const qkvWeight = layerWeights.attn_qkv_weight;
+            const qkvBias = layerWeights.attn_qkv_bias;
             
             const startQ = headIndex * headDim;
             const startK = embedDim + headIndex * headDim;
@@ -372,11 +372,12 @@ class AttentionHead {
             this.KeyBias = Array(headDim).fill(0);
             this.ValueBias = Array(headDim).fill(0);
             
+            // FIXED: Correct transposed indexing for GGUF layout [3*embed_dim, embed_dim]
             for (let i = 0; i < embedDim; i++) {
                 for (let j = 0; j < headDim; j++) {
-                    this.QueryWeights[i][j] = qkvWeight[i * 3 * embedDim + startQ + j];
-                    this.KeyWeights[i][j] = qkvWeight[i * 3 * embedDim + startK + j];
-                    this.ValueWeights[i][j] = qkvWeight[i * 3 * embedDim + startV + j];
+                    this.QueryWeights[i][j] = qkvWeight[(startQ + j) * embedDim + i];
+                    this.KeyWeights[i][j] = qkvWeight[(startK + j) * embedDim + i];
+                    this.ValueWeights[i][j] = qkvWeight[(startV + j) * embedDim + i];
                 }
             }
             
@@ -461,13 +462,15 @@ class MultiHeadAttention {
         
         if (layerWeights && layerWeights.attn_proj_weight) {
             // Load output projection weights
-            const projWeight = layerWeights.attn_proj_weight; // [embed_dim, embed_dim]
-            const projBias = layerWeights.attn_proj_bias;     // [embed_dim]
+            // GGUF stores as [embed_dim, embed_dim] (output_dim, input_dim)
+            const projWeight = layerWeights.attn_proj_weight;
+            const projBias = layerWeights.attn_proj_bias;
             
+            // FIXED: Correct transposed indexing
             this.OutputWeights = zeros(embedDim, embedDim);
             for (let i = 0; i < embedDim; i++) {
                 for (let j = 0; j < embedDim; j++) {
-                    this.OutputWeights[i][j] = projWeight[i * embedDim + j];
+                    this.OutputWeights[i][j] = projWeight[j * embedDim + i];
                 }
             }
             this.OutputBias = projBias ? to1DArray(projBias) : Array(embedDim).fill(0);
@@ -504,23 +507,27 @@ class MultiHeadAttention {
 class FeedForwardNetwork {
     constructor(embedDim, hiddenDim, layerWeights) {
         if (layerWeights && layerWeights.ffn_up_weight) {
-            const upWeight = layerWeights.ffn_up_weight;     // [embed_dim, hidden_dim]
+            const upWeight = layerWeights.ffn_up_weight;     // GGUF: [hidden_dim, embed_dim]
             const upBias = layerWeights.ffn_up_bias;         // [hidden_dim]
-            const downWeight = layerWeights.ffn_down_weight; // [hidden_dim, embed_dim]
+            const downWeight = layerWeights.ffn_down_weight; // GGUF: [embed_dim, hidden_dim]
             const downBias = layerWeights.ffn_down_bias;     // [embed_dim]
             
+            // FIXED: Correct transposed indexing for up projection
+            // GGUF stores [hidden_dim, embed_dim], we need weights[embed_dim][hidden_dim]
             this.layer1Weights = zeros(embedDim, hiddenDim);
             for (let i = 0; i < embedDim; i++) {
                 for (let j = 0; j < hiddenDim; j++) {
-                    this.layer1Weights[i][j] = upWeight[i * hiddenDim + j];
+                    this.layer1Weights[i][j] = upWeight[j * embedDim + i];
                 }
             }
             this.layer1Bias = upBias ? to1DArray(upBias) : Array(hiddenDim).fill(0);
             
+            // FIXED: Correct transposed indexing for down projection
+            // GGUF stores [embed_dim, hidden_dim], we need weights[hidden_dim][embed_dim]
             this.layer2Weights = zeros(hiddenDim, embedDim);
             for (let i = 0; i < hiddenDim; i++) {
                 for (let j = 0; j < embedDim; j++) {
-                    this.layer2Weights[i][j] = downWeight[i * embedDim + j];
+                    this.layer2Weights[i][j] = downWeight[j * hiddenDim + i];
                 }
             }
             this.layer2Bias = downBias ? to1DArray(downBias) : Array(embedDim).fill(0);
@@ -638,19 +645,22 @@ class Transformer {
             finalLnWeights?.bias
         );
         
-        // Output projection (lm_head) - for language modeling, this is often tied to embeddings
+        // Output projection (lm_head) - for language modeling
         const lmHeadWeight = getLMHeadWeight();
         if (lmHeadWeight) {
+            // GGUF lm_head is [vocab_size, embed_dim]
+            // We need outWeights[embed_dim][vocab_size] for: logit[c] = sum_j(hidden[j] * outWeights[j][c])
             this.outWeights = zeros(embedDim, numClasses);
             for (let i = 0; i < embedDim; i++) {
                 for (let j = 0; j < numClasses; j++) {
-                    // lm_head is [vocab_size, embed_dim], we need [embed_dim, vocab_size]
+                    // FIXED: lmHeadWeight is [vocab_size, embed_dim] row-major
                     this.outWeights[i][j] = lmHeadWeight[j * embedDim + i];
                 }
             }
             this.outBias = Array(numClasses).fill(0);
         } else if (embeddingMatrix) {
             // Use tied embeddings (transpose of token embeddings)
+            // embeddingMatrix is [vocab_size, embed_dim] row-major
             this.outWeights = zeros(embedDim, numClasses);
             for (let i = 0; i < embedDim; i++) {
                 for (let j = 0; j < numClasses; j++) {
