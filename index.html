@@ -188,6 +188,7 @@
     <p style="color: #aaa; margin: 8px 0; font-size: 1.1em;">Now that you've loaded the GGUF weights and tokenizer, you can generate text with REAL GPT-2 weights!</p>
     <textarea id="promptText" style="width:90%;margin-top: 0.8em; height: 80px; padding: 8px; font-size: 1em;" placeholder="Enter your prompt here... (e.g., 'Once upon a time')">Once upon a time</textarea><br>
     <label style="margin-top: 12px; display: block;">Max new tokens: <input type="number" id="maxTokens" value="5" min="1" max="100" style="width: 60px;"></label>
+    <label style="margin-top: 8px; display: block;">Temperature: <input type="number" id="temperature" value="1.0" min="0.1" max="2.0" step="0.1" style="width: 60px;"> <span style="color:#aaa; font-size:0.9em;">(0.1 = deterministic, 1.0 = normal, 2.0 = creative)</span></label>
     <button class="btn" onclick="generateText()" style="margin-top: 12px; padding: 12px 24px; font-size: 1.1em; background: #4f4; color: #000;">Generate Text!</button>
     <div id="generationOutput" style="margin:1em 0 0 0;"></div>
 </div>
@@ -1198,6 +1199,7 @@ window.generateText = async function() {
     
     const promptText = document.getElementById('promptText').value;
     const maxTokens = parseInt(document.getElementById('maxTokens').value);
+    const temperature = parseFloat(document.getElementById('temperature').value) || 1.0;
     
     if (!promptText.trim()) {
         output.innerHTML = "<span style='color:#f44'>Enter a prompt!</span>";
@@ -1253,13 +1255,36 @@ window.generateText = async function() {
             
             const logits = transformer.predict(inputEmbeddings);
             
-            // Temperature sampling (greedy for now)
-            let bestTokenId = 0;
-            let bestLogit = logits[0];
-            for (let i = 1; i < logits.length; i++) {
-                if (logits[i] > bestLogit) {
-                    bestLogit = logits[i];
-                    bestTokenId = i;
+            // Temperature sampling
+            let bestTokenId;
+            if (temperature < 0.15) {
+                // Near-greedy: pick highest logit
+                bestTokenId = 0;
+                let bestLogit = logits[0];
+                for (let i = 1; i < logits.length; i++) {
+                    if (logits[i] > bestLogit) {
+                        bestLogit = logits[i];
+                        bestTokenId = i;
+                    }
+                }
+            } else {
+                // Temperature-scaled softmax sampling
+                const scaledLogits = logits.map(l => l / temperature);
+                const maxLogit = Math.max(...scaledLogits);
+                const exps = scaledLogits.map(l => Math.exp(l - maxLogit));
+                const sumExps = exps.reduce((a, b) => a + b, 0);
+                const probs = exps.map(e => e / sumExps);
+                
+                // Sample from the distribution
+                const rand = Math.random();
+                let cumulative = 0;
+                bestTokenId = probs.length - 1;
+                for (let i = 0; i < probs.length; i++) {
+                    cumulative += probs[i];
+                    if (rand < cumulative) {
+                        bestTokenId = i;
+                        break;
+                    }
                 }
             }
             
